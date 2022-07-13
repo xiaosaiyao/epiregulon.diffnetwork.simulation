@@ -33,9 +33,10 @@ simulateTF <- function(n_tfs = 5, n_cells = 100, groups = 2, rates = NULL,
     rates_cells[start_idx:end_idx,] <- rep(rates[g,], each = n_cells_per_group)
   }
   # create TF expression matrix
-  expr <- matrix(
-    rpois(n_cells*n_tfs, rate =  rates_cells),
+  expr <- Matrix::Matrix(
     nrow = n_cells, ncol = n_tfs,
+    data = rpois(n_cells*n_tfs, lambda =  rates_cells),
+    sparse=T,
     dimnames = list(
       paste0('cell',1:n_cells),
       paste0('tf',1:n_tfs)
@@ -48,16 +49,17 @@ simulateTF <- function(n_tfs = 5, n_cells = 100, groups = 2, rates = NULL,
 # simulate lambda_cr if not inputting from peakVI output
 # either beta- or gamma-distributed
 simulateLambda <- function(n_cells = 100, n_peaks = 300, option='beta') {
+  if (option=='beta') {
+    vals <- rbeta(n=n_cells*n_peaks, shape1=1,shape2=8)
+  } else if (option=='gamma') {
+    vals <- rgamma(n=n_cells*n_peaks, shape=1,rate=1)
+  } else {
+    stop('option must be either beta or gamma')
+  }
   return(
     matrix(
-      data = ifelse(
-        option=='beta', rbeta(n_cells*n_peaks, 1, 1), 
-        rgamma(n_cells*n_peaks, 1, 1)
-      ),
-      nrow = n_cells, ncol = n_peaks,
-      dimnames = list(
-        paste0('cell',1:n_cells),
-        paste0('peak',1:n_peaks)
+      data = vals, nrow = n_cells, ncol = n_peaks,
+      dimnames = list(paste0('cell',1:n_cells), paste0('peak',1:n_peaks)
       )
     )
   )
@@ -66,79 +68,98 @@ simulateLambda <- function(n_cells = 100, n_peaks = 300, option='beta') {
 # simulate peaks
 simulatePeak <- function(n_cells = 100, n_peaks = 300, option = 'bernoulli', lambda = NULL) {
   if (is.null(lambda)) {
-    lambda <- simulateLambda(n_cells, n_peaks)
+    if (option == 'bernoulli') {
+      lambda <- simulateLambda(n_cells, n_peaks, option='beta')
+    } else if (option == 'poisson') {
+      lambda <- simulateLambda(n_cells, n_peaks, option='gamma')
+    } else {
+      stop('option must be bernoulli or poisson')
+    }
   }
-  return(
-    matrix(
-      rbinom(n_cells*n_peaks, 1, lambda),
-      nrow = n_cells, ncol = n_peaks,
-      dimnames = list(
-        paste0('cell', 1:n_cells),
-        paste0('peak', 1:n_peaks)
-      )
-    )
-  )
+  vals <- rbinom(n_cells*n_peaks, 1, lambda)
+  M <- Matrix::Matrix(nrow = n_cells, ncol = n_peaks,
+                      data = vals, sparse=T)
+  return(M)
 }
 
 # simulate indicator matrix if not inputting from ChIP-seq/TF motifs for
 # TF>RE or inputting positional information (REs within 100kb of gene) RE>TG
 # density is what fraction of the matrix is non-zero
-simulateIndicator <- function(nrow, ncol, density=0.1) {
-  return(
-    rsparsematrix(nrow=nrow, ncol=ncol, density=density, 
-                  rand.x = function(n)  rbinom(n, size=1, prob=1))
-  )
+# if the indicator matrix is banded, ignores density
+simulateIndicator <- function(nrow, ncol, density=NULL, banded = F, band_size=NULL) {
+  if (banded) {
+    if (is.null(band_size)) {
+      band_size <-5
+    }
+    M <- bandSparse(nrow=nrow, ncol=ncol, k=c(0:(band_size-1)))
+  } else {
+    if (is.null(density)) {
+      density <- 0.1 # default density value
+    }
+    M <- rsparsematrix(nrow=nrow, ncol=ncol, density=density, 
+                       rand.x = function(n)  rbinom(n, size=1, prob=1))
+  }
+  return(M)
+}
+
+# generic simulate weights function
+# can be used for U, V, and B
+simulateWeights <- function(nrow, ncol, binary = T, density = NULL, 
+                            indicator_mat = NULL, banded = FALSE, band_size =  NULL) {
+  if (is.null(indicator_mat)) {
+    indicator_mat <- simulateIndicator(nrow, ncol, density=density, banded = banded)
+  }
+  M <- indicator_mat
+  if (!binary) {
+    idx <- which(M>0)
+    M[idx] <- runif(length(idx), 0, 1)
+  } 
+  return(M)
 }
 
 # simulate binding affinity B
-simulateB <- function(n_cells = 100, n_peaks = 300, binary = T, indicator_mat = NULL) {
-  if (is.null(indicator_mat)) {
-    indicator_mat <- simulateIndicator(n_cells, n_peaks, density=0.1)
-  }
-  B <- indicator_mat
-  if (!binary) {
-    idx <- which(B>0)
-    B[idx] <- runif(length(idx), 0, 1)
-  } 
-  return(B)
+simulateB <- function(n_tfs = 5, n_peaks = 300, binary = T, indicator_mat = NULL) {
+  return(simulateWeights(n_tfs, n_peaks, binary, indicator_mat))
 }
 
 # simulate the RE->TG weights V
 simulateV <- function(n_peaks = 300, n_genes = 50, binary = T,  indicator_mat = NULL) {
-  if (is)
+  return(simulateWeights(n_peaks, n_genes, binary, indicator_mat))
 }
 
-simulateGene <- function()
-
-# Target gene expression
-# n is the number of genes to simulate the expression of
-simulateTG <- function(RE, n, v = NULL) {
-  lambdas <- RE$lambdas
-  nCells <- nrow(lambdas)
-  nREs <- ncol(lambdas)
-  if (!is.null(v)) {
-    if (length(dim(v))!=2) {
-      stop('if specifying, v must be a matrix of weights of RE x TG')
-    }
-    if (ncol(v) != n) {
-      stop('Length of v columns must be equal to number of generated TGs n')
-    }
-    if (nrow(v) != nREs) {
-      stop('Length of v rows must be equal to number of REs in RE object')
-    }
-  } else {
-    v <- matrix(runif(nREs*n, 0, 0.1), nrow = nREs, ncol = n,
-                dimnames = list(paste0('Peak', seq(1, nREs)),
-                                paste0('Gene', seq(1, n))))
+# simulate the regulatory effect of TF t on RE r, alpha
+simulateAlpha <- function(n_tfs = 5, n_peaks  = 300) {
+  # simulate TF centers
+  means <- rnorm(n_tfs, 2, 2)
+  # simulate TF regulator effects
+  alphas <- matrix(nrow = n_tfs, ncol = n_peaks)
+  for (i in 1:n_tfs) {
+    alphas[i,] <- rnorm(n_peaks, mean=means[i], 1)
   }
-  means <- lambdas%*%v
-  lambdas <- matrix(rgamma(nCells*n, shape = exp(means)), nrow = nCells, ncol = n,
-                    dimnames = list(paste0('Cell', seq(1, nCells)),
-                                    paste0('Gene', seq(1, n))))
-  y_cg <- matrix(rpois(n = nCells*n, lambda = lambdas), nrow = nCells, ncol = n,
-                 dimnames = list(paste0('Cell', seq(1, nCells)),
-                                 paste0('Gene', seq(1, n))))
-  dropout <- matrix(rbinom(n = nCells*n, size = 1, prob = 0.5), nrow = nCells, ncol = n)
-  y_cg[dropout==1] <- 0
-  return(list(weights = v, lambdas = lambdas, counts = y_cg))
+  return(alphas)
 }
+
+# in case want to simulate U separately without gene expression info
+simulateU <-  function(n_tfs = 5, n_peaks = 300, alphas = NULL, B = NULL) {
+  if (is.null(alphas)) {
+    alphas <- simulateAlpha(n_tfs, n_peaks)
+  }
+  if (is.null(B)) {
+    B <- simulateB(n_tfs, n_peaks)
+  }
+  return(alphas*B)
+}
+
+
+# simulate target gene expression
+# X_tf is tf expression
+# returns X_cg, target gene expression
+simulateGene <- function(alphas, V, X_tf, B, lambdas) {
+  binding_prob <-  1-exp(-X_tf*(lambdas%*%t(B)))
+  binding <- Matrix::Matrix(nrow = nrow(binding_prob), ncol = ncol(binding_prob),
+                            data = rbinom(n=length(binding_prob), size=1, prob=as.matrix(binding_prob)))
+  X_cg <- binding %*% alphas %*% V
+  return(X_cg)
+}
+
+
