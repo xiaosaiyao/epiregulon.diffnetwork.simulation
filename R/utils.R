@@ -1,66 +1,100 @@
-# TF activity simulated from Uniform(0,1)
-# 1 is active, 0 is inactive
+library(Matrix)
+
+# TF expression X_ct simulated from Poisson
 # nTFs is total number of TFs to simulate
 # nCells is total number of cells to simulate
 # groups is total number of groups or "cell types" to simulate, each will have
-# a separate baseline TF activity profile. if groups = 2, the number of cells
-# per group is nCells/2
-simulateTF <- function(nTFs, nCells, groups = 2, sd = 0.1) {
-  baseline_activity <- matrix(runif(nTFs*2), nrow = groups, ncol = nTFs,
-                              dimnames = list(paste0('Group', 1:groups),
-                                              paste0('TF', seq(1, nTFs))))
-  baseline_activity_cells <- rnorm(
-    nTFs*nCells,
-    mean = rep(baseline_activity, each = nCells/groups),
-    sd = sd
+# if groups = 2, the number of cells per group is nCells/2
+# if rates (Poisson parameter) can be specified to a groups x nTFs data frame that specifies the
+# rate values for each TF in each group. 
+# otherwise, defaults to making a single TF differ drastically in the rate
+# parameter for Group 1, and the rest the same
+# plz make n_cells divisible by groups
+simulateTF <- function(n_tfs = 5, n_cells = 100, groups = 2, rates = NULL,
+                       baseline_rate = 0.5, perturbed_rate = 2) {
+  if (is.null(rates)) {
+    rates <- matrix(
+      baseline_rate,
+      nrow = groups, ncol = n_tfs,
+      dimnames = list(paste0('Group', 1:groups),
+                      paste0('TF', 1:n_tfs))
+    )
+    if (groups > 1) {
+      # create artificial differences 
+      rates[1,1] <- perturbed_rate
+    }
+  }
+  # expand rates matrix to generate for each cell
+  n_cells_per_group <- n_cells/groups
+  rates_cells <- matrix(nrow = n_cells, ncol = n_tfs)
+  for (g in 1:groups) {
+    start_idx <- (g-1)*n_cells_per_group+1
+    end_idx <- start_idx + n_cells_per_group-1
+    rates_cells[start_idx:end_idx,] <- rep(rates[g,], each = n_cells_per_group)
+  }
+  # create TF expression matrix
+  expr <- matrix(
+    rpois(n_cells*n_tfs, rate =  rates_cells),
+    nrow = n_cells, ncol = n_tfs,
+    dimnames = list(
+      paste0('cell',1:n_cells),
+      paste0('tf',1:n_tfs)
+    )
   )
-  baseline_activity_cells[baseline_activity_cells<0] <- 0
-  baseline_activity_cells[baseline_activity_cells>1] <- 1
-  activity <- matrix(baseline_activity_cells,
-                     nrow = nCells, ncol = nTFs,
-                     dimnames = list(paste0('Cell', seq(1, nCells)),
-                                     paste0('TF', seq(1, nTFs))))
-  return(list(baseline_activity = baseline_activity,
-              activity = activity,
-              groups = rep(seq(1,groups), each = nCells/groups)))
+  return(expr)
 }
 
-# Regulatory element (ATAC peak) accessibility
-# n is total number of ATAC peaks
-# each peak is associated with at least 1 TF
-# u is the matrix of weights for each TF x RE interaction
-# N is total count per cell (sequencing depth)
-# 
-simulateRE <- function(TF, n, u = NULL, N = NULL) {
-  x_ct <- TF$activity
-  nTFs <- ncol(x_ct)
-  nCells <- nrow(x_ct)
-  if (!is.null(u)) {
-    if (length(dim(u))!=2) {
-      stop('if specifying, u must be a matrix of weights of TF x RE')
-    }
-    if (ncol(u) != n) {
-      stop('Length of u columns must be equal to number of generated REs n')
-    }
-    if (nrow(u) != nTFs) {
-      stop('Length of u rows must be equal to number of TFs in TF object')
-    }
-  } else {
-    u <- matrix(runif(nTFs*n, 0, 0.05), nrow = nTFs, ncol = n,
-                dimnames = list(paste0('TF', seq(1, nTFs)),
-                                paste0('Peak', seq(1, n))))
-  }
-  shapes <- x_ct%*%u
-  lambdas <- matrix(rgamma(nCells*n, shape = exp(shapes)), nrow = nCells, ncol = n,
-                    dimnames = list(paste0('Cell', seq(1, nCells)),
-                                    paste0('Peak', seq(1, n))))
-  y_cr <- matrix(rpois(n = nCells*n, lambda = lambdas), nrow = nCells, ncol = n,
-                 dimnames = list(paste0('Cell', seq(1, nCells)),
-                                 paste0('Peak', seq(1, n))))
-  dropout <- matrix(rbinom(n = nCells*n, size = 1, prob = 0.5), nrow = nCells, ncol = n)
-  y_cr[dropout==1] <- 0
-  return(list(weights = u, lambdas = lambdas, counts = y_cr))
+
+# simulate lambda_cr if not inputting from peakVI output
+# either beta- or gamma-distributed
+simulateLambda <- function(n_cells, n_peaks, option='beta') {
+  return(
+    matrix(
+      data = ifelse(
+        option=='beta', rbeta(n_cells*n_peaks, 1, 1), 
+        rgamma(n_cells*n_peaks, 1, 1)
+      ),
+      nrow = n_cells, ncol = n_peaks,
+      dimnames = list(
+        paste0('cell',1:n_cells),
+        paste0('peak',1:n_peaks)
+      )
+    )
+  )
 }
+
+# simulate peaks
+simulatePeak <- function(n_cells, n_peaks, option = 'bernoulli', lambda = NULL) {
+  if (is.null(lambda)) {
+    lambda <- simulateLambda(n_cells, n_peaks)
+  }
+  return(
+    matrix(
+      rbinom(n_cells*n_peaks, 1, lambda),
+      nrow = n_cells, ncol = n_peaks,
+      dimnames = list(
+        paste0('cell', 1:n_cells),
+        paste0('peak', 1:n_peaks)
+      )
+    )
+  )
+}
+
+# simulate indicator matrix if not inputting from ChIP-seq/TF motifs for
+# TF>RE or inputting positional information (REs within 100kb of gene) RE>TG
+# density is what fraction of the matrix is non-zero
+simulateIndicator <- function(nrow, ncol, density=0.1) {
+  return(
+    rsparsematrix(nrow=nrow, ncol=ncol, density=density)
+  )
+}
+
+# simulate binding affinity B
+simulateB <- function(n_cells, n_peaks, binary = T, indicator_mat = NULL) {
+  
+}
+
+simulateGene <- function()
 
 # Target gene expression
 # n is the number of genes to simulate the expression of
