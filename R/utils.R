@@ -47,7 +47,7 @@ simulateTF <- function(n_tfs = 5, n_cells = 100, groups = 2, rates = NULL,
 
 # simulate lambda_cr if not inputting from peakVI output
 # either beta- or gamma-distributed
-simulateLambda <- function(n_cells, n_peaks, option='beta') {
+simulateLambda <- function(n_cells = 100, n_peaks = 300, option='beta') {
   return(
     matrix(
       data = ifelse(
@@ -64,7 +64,7 @@ simulateLambda <- function(n_cells, n_peaks, option='beta') {
 }
 
 # simulate peaks
-simulatePeak <- function(n_cells, n_peaks, option = 'bernoulli', lambda = NULL) {
+simulatePeak <- function(n_cells = 100, n_peaks = 300, option = 'bernoulli', lambda = NULL) {
   if (is.null(lambda)) {
     lambda <- simulateLambda(n_cells, n_peaks)
   }
@@ -85,13 +85,27 @@ simulatePeak <- function(n_cells, n_peaks, option = 'bernoulli', lambda = NULL) 
 # density is what fraction of the matrix is non-zero
 simulateIndicator <- function(nrow, ncol, density=0.1) {
   return(
-    rsparsematrix(nrow=nrow, ncol=ncol, density=density)
+    rsparsematrix(nrow=nrow, ncol=ncol, density=density, 
+                  rand.x = function(n)  rbinom(n, size=1, prob=1))
   )
 }
 
 # simulate binding affinity B
-simulateB <- function(n_cells, n_peaks, binary = T, indicator_mat = NULL) {
-  
+simulateB <- function(n_cells = 100, n_peaks = 300, binary = T, indicator_mat = NULL) {
+  if (is.null(indicator_mat)) {
+    indicator_mat <- simulateIndicator(n_cells, n_peaks, density=0.1)
+  }
+  B <- indicator_mat
+  if (!binary) {
+    idx <- which(B>0)
+    B[idx] <- runif(length(idx), 0, 1)
+  } 
+  return(B)
+}
+
+# simulate the RE->TG weights V
+simulateV <- function(n_peaks = 300, n_genes = 50, binary = T,  indicator_mat = NULL) {
+  if (is)
 }
 
 simulateGene <- function()
