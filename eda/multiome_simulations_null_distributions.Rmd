@@ -1,0 +1,283 @@
+---
+title: "multiome simulation eda (with null distributions)"
+author: "timothy keyes"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=TRUE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+```
+
+# Parameters
+
+```{r}
+library(tidyverse)
+library(tidygraph)
+library(patchwork)
+
+source(here::here("R", "utils.R"))
+source(here::here("R", "differential_network_utils.R"))
+
+NUM_TFS <- 100
+NUM_RES <- 400 # 13000 
+NUM_TGS <- 400
+NUM_TFS_TO_MODULATE <- 30L
+NOISE_SEQUENCE <- seq(0.00, 0.5, 0.05)
+SIGNAL_SEQUENCE <- seq(0.00, 0.5, 0.05)
+
+truth <- 
+  tibble(
+    node_name = paste0("TF", 1:NUM_TFS), 
+    is_differential = 
+      c(
+        rep("yes", NUM_TFS_TO_MODULATE), 
+        rep("no", NUM_TFS - NUM_TFS_TO_MODULATE)
+      )
+  )
+```
+
+# Introduction 
+
+In this notebook, we perform identical simulations to those described in `multiome_simulations.Rmd`, but using resampling-based null-distribution estimation to compute a p-value for each TF. These p-values can be used to rank TFs from most to least differential instead of using their raw degree differences (in the separately-constructed networks) or their degree in the edge-subtracted network. 
+
+
+# First simulation
+
+## create U and V 
+
+
+```{r}
+# create a random value between 0.2 and 0.8 for row of u and v 
+# representing the sparsity of that row 
+u_sequence <- runif(n = NUM_TFS, min = 0.2, max = 0.8)
+v_sequence <- runif(n = NUM_RES, min = 0.2, max = 0.8)
+
+# simulate u
+u <- 
+  simulate_u(
+    num_tfs = NUM_TFS, 
+    num_res = NUM_RES, 
+    bernoulli_param = u_sequence
+  )
+
+# simulate v
+v <- 
+  simulate_v(
+    num_res = NUM_RES, 
+    num_tgs = NUM_TGS,
+    bernoulli_param = v_sequence
+  )
+```
+
+
+## simulate 2 cell types from u and v 
+
+```{r}
+u_1b <- 
+  u |> 
+  add_signal(
+    num_tfs_to_modulate = NUM_TFS_TO_MODULATE, 
+    prop_edges_to_enrich = 0.2
+  ) |> 
+  add_noise(addition_prop = 0.1, remove_prop = 0, permutation_prop = 0) |> 
+  tidy_u() |> 
+  filter(abs(weight) > 0)
+
+u_2b <- 
+  u |> 
+  add_signal(
+    num_tfs_to_modulate = NUM_TFS_TO_MODULATE, 
+    prop_edges_to_enrich = 0, 
+    prop_edges_to_deplete =  0.2
+  ) |> 
+  add_noise(addition_prop = 0, remove_prop = 0.2, permutation_prop = 0) |> 
+  tidy_u() |> 
+  filter(abs(weight) > 0)
+
+# create first baseline cell type by taking the base network and 
+# applying random noise
+num_edges_to_add <- 
+  abs(sum(abs(u) > 0) - nrow(u_1b))
+
+num_edges_to_remove <- 
+  abs(sum(abs(u) > 0) - nrow(u_2b))
+
+u_1a <- 
+  u |> 
+  add_edges(addition_num = num_edges_to_add) |> 
+  tidy_u() |> 
+  filter(abs(weight) > 0)
+
+u_2a <- 
+  u |> 
+  remove_edges(remove_num = num_edges_to_remove) |> 
+  tidy_u() |> 
+  filter(abs(weight) > 0)
+```
+
+
+## Compute null distributions 
+
+```{r}
+centrality_enrichment_nulls <- 
+  compute_null_distributions(
+    weight_matrix = u, 
+    num_replicates = 1000, 
+    addition_num = num_edges_to_add, 
+    remove_prop = 0, 
+    permutation_prop = 0, 
+    difference_method = "centrality"
+  )
+
+edge_enrichment_nulls <- 
+  compute_null_distributions(
+    weight_matrix = u, 
+    num_replicates = 1000, 
+    addition_num = num_edges_to_add, 
+    remove_prop = 0, 
+    permutation_prop = 0, 
+    difference_method = "edge"
+  )
+```
+
+```{r}
+centrality_depletion_nulls <- 
+  compute_null_distributions(
+    weight_matrix = u, 
+    num_replicates = 1000, 
+    addition_num = 0, 
+    remove_num = num_edges_to_remove,
+    permutation_prop = 0, 
+    difference_method = "centrality"
+  )
+
+edge_depletion_nulls <- 
+  compute_null_distributions(
+    weight_matrix = u, 
+    num_replicates = 1000, 
+    addition_num = 0, 
+    remove_num = num_edges_to_remove,
+    permutation_prop = 0, 
+    difference_method = "edge"
+  )
+```
+
+
+## Compare networks
+
+```{r}
+centrality_enrichment_results <- 
+  compare_networks(
+    edge_list_1 = u_1a, 
+    edge_list_2 = u_1b, 
+    difference_method = "centrality", 
+    null_distributions = centrality_enrichment_nulls
+  )
+
+edge_enrichment_results <- 
+  compare_networks(
+    edge_list_1 = u_1a, 
+    edge_list_2 = u_1b, 
+    difference_method = "edge", 
+    null_distributions = edge_enrichment_nulls
+  )
+
+centrality_depletion_results <- 
+  compare_networks(
+    edge_list_1 = u_2a, 
+    edge_list_2 = u_2b, 
+    difference_method = "centrality", 
+    null_distributions = centrality_depletion_nulls
+  )
+
+edge_depletion_results <- 
+  compare_networks(
+    edge_list_1 = u_2a, 
+    edge_list_2 = u_2b, 
+    difference_method = "edge", 
+    null_distributions = edge_depletion_nulls
+  )
+```
+
+## Plot results 
+
+### centrality difference
+
+```{r}
+centrality_enrichment_results |> 
+  plot_roc_curve(pred_col = degree_diff, truth = truth) + 
+  labs(subtitle = "raw degree difference")
+
+centrality_enrichment_results |> 
+  mutate(score = 1 - p_value_null) |> 
+  plot_roc_curve(pred_col = score, truth = truth) + 
+  labs(subtitle = "degree difference p-value")
+
+centrality_depletion_results |> 
+  plot_roc_curve(pred_col = degree_diff, truth = truth) + 
+  labs(subtitle = "raw degree difference")
+
+centrality_depletion_results |> 
+  mutate(score = 1 - p_value_null) |> 
+  plot_roc_curve(pred_col = score, truth = truth) + 
+  labs(subtitle = "degree difference p-value")
+
+```
+
+### edge subtraction 
+
+```{r}
+edge_enrichment_results |> 
+  plot_roc_curve(pred_col = degree, truth = truth) + 
+  labs(subtitle = "raw degree")
+
+edge_enrichment_results |> 
+  mutate(score = 1 - p_value_null) |> 
+  plot_roc_curve(pred_col = score, truth = truth) + 
+  labs(subtitle = "degree p-value")
+
+edge_depletion_results |> 
+  plot_roc_curve(pred_col = degree, truth = truth) + 
+  labs(subtitle = "raw degree")
+
+edge_depletion_results |> 
+  mutate(score = 1 - p_value_null) |> 
+  plot_roc_curve(pred_col = score, truth = truth) + 
+  labs(subtitle = "degree p-value")
+```
+
+
+```{r}
+plot_null_distributions(
+  null_distributions = centrality_enrichment_nulls, 
+  predictions = mutate(centrality_enrichment_results, degree = abs(degree_diff)),  
+  tf_numbers = 
+    c(1:15, (nrow(centrality_enrichment_results) - 15):nrow(centrality_enrichment_results))
+)
+```
+
+
+
+```{r}
+plot_null_distributions(
+  null_distributions = edge_enrichment_nulls, 
+  predictions = edge_enrichment_results, 
+  tf_numbers = 
+    c(1:5, (nrow(edge_enrichment_results) - 5):nrow(edge_enrichment_results))
+)
+```
+
+
+
+# Varying signal 
+
+```{r}
+
+```
+
+
+# Varying noise 
+
+
+

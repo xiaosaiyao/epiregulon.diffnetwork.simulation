@@ -1,0 +1,2015 @@
+---
+title: "multiome simulation eda"
+author: "timothy keyes"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=TRUE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+```
+
+# Parameters
+
+```{r}
+library(tidyverse)
+library(tidygraph)
+library(patchwork)
+
+source(here::here("R", "utils.R"))
+source(here::here("R", "differential_network_utils.R"))
+
+NUM_TFS <- 250
+NUM_RES <- 500 # 13000 
+NUM_TGS <- 1000
+NUM_TFS_TO_MODULATE <- 75L
+NOISE_SEQUENCE <- seq(0.00, 0.5, 0.05)
+SIGNAL_SEQUENCE <- seq(0.00, 0.5, 0.05) / 2
+
+truth <- 
+  tibble(
+    node_name = paste0("TF", 1:NUM_TFS), 
+    is_differential = 
+      c(
+        rep("yes", NUM_TFS_TO_MODULATE), 
+        rep("no", NUM_TFS - NUM_TFS_TO_MODULATE)
+      )
+  )
+```
+
+
+# Introduction 
+
+In this notebook, we try some initial simulations of differential networks built using the u and v matrices that come from bayesian model fitting in epiregulon 2.0. It reuses some ideas from [this code](https://code.roche.com/kammj2/2022-bayes-multiome/-/blob/master/example_jax.py) written by Jack Kamm. 
+
+Explicitly, the goals of these simulations are to use simulated u and v matrices to create pairs of networks that differ from one another in four ways: 
+
+1) Noise (in the form of randomly permuted edges) 
+2) True differential signal (in the form of adding edges between TF -> REs, i.e. reducing sparsity in the u matrix). 
+3) True differential signal (in the form of removing edges between TF -> REs, i.e. 
+increasing sparsity in the u matrix). 
+4) True differential signal (in the form of permuting a TF's TF -> RE edges, i.e. maintaing the sparsity in the u matrix but altering which entries are nonzero and 0.)
+
+# First simulation
+
+As a first pass, we walk through all the (current) steps in our simulation pipeline. These steps are also wrapped by `run_full_simulation()`.  
+
+## Create base u and v matrices
+
+We use `simulate_u()` and `simulate_v()` to create u and v matrices. Entries in both matrices are distributed along a standard normal, and sparsity is introduced into the matrices by dropping out entries randomly to 0 with a 0.2-0.8 probability (sampled independently for each TF from a uniform distribution).
+
+We can think of these u and v matrices as encoding the information for our "base" network. 
+
+
+```{r sim_u_and_v}
+# sequences of bernoulli random variables (one for each TF) to encode the 
+# dropout probability for each TF 
+u_sequence <- runif(n = NUM_TFS, min = 0.1, max = 0.4)
+v_sequence <- runif(n = NUM_RES, min = 0.1, max = 0.4)
+
+# simulate u and v
+u <- 
+  simulate_u(
+    num_tfs = NUM_TFS, 
+    num_res = NUM_RES, 
+    bernoulli_param = u_sequence
+  )
+
+v <- 
+  simulate_v(
+    num_res = NUM_RES, 
+    num_tgs = NUM_TGS,
+    bernoulli_param = v_sequence
+  )
+```
+
+
+Using the input matrices, we can create lists of TF -> RE and RE -> TG edges for our network. 
+
+
+```{r}
+# tidy the weight matrices into edge lists 
+u_tidy <- tidy_u(u)
+v_tidy <- tidy_v(v)
+
+print(u_tidy)
+print(v_tidy)
+```
+
+
+```{r}
+u_tidy |> 
+  group_by(tf) |> 
+  summarize(nonzero_edges = sum(abs(weight) > 0)) |> 
+  ggplot(aes(x = nonzero_edges)) + 
+  geom_histogram(bins = 30) + 
+  theme_bw() + 
+  labs(subtitle = "Simulated TFs have varied numbers of nonzero edges")
+```
+
+
+## Simulate 2 separate cell types from the base network
+
+From here, we can mutate the base network twice to represent a "default" cell type (that all other cell types will be compared to) and several other cell types with specific differences from the base network. These mutations will follow the following procedures:  
+
+* **Default cell type**: Add noise to the base network by permuting some percentage of edges randomly (maintaining the same degree of sparsity)
+* **Second cell type**: Add additional edges between a user-specified subset of the TFs and a random subset of the REs. The number of edges added is given as a percentage of each TF's number of nonzero edges in the base network (to maintain differences in TF -> RE connectivity between TFs). Then add noise by permuting some subset of the random edges. We call this type of signal **edge enrichment**.
+* **Third cell type**: Remove edges between a user-specified subset of the TFs and a random subset of the REs. The number of edges removed is given as a percentage of each TF's number of nonzero edges in the base network (to maintain differences in TF -> RE connectivity between TFs). Then add noise by permuting some subset of the random edges. We call this type of signal **edge depletion**.
+* **Fourth cell type**: Permute edges within a user-specified subset of the TFs such that the number of TF -> RE edges for each TF remains the same, but with different TF -> RE connectivity. The number of edges removed is given as a percentage of each TF's number of nonzero edges in the base network (to maintain differences in TF -> RE connectivity between TFs). Then add noise by permuting some subset of the random edges. We call this type of signal **edge permutation**.
+
+For a first pass, we use 10% noise (randomly permute 10% of the edges in the base network). 
+
+```{r sim_cell_types}
+# random noise from the base network (permutation)
+u_1 <- 
+  u |> 
+  permute_edges(permutation_prop = 0.1) |> 
+  tidy_u() |> 
+  filter(abs(weight) > 0)
+  
+# add "true" signal to TFs by adding edges to 10% more new REs 
+u_2 <- 
+  u |> 
+  add_signal(
+    num_tfs_to_modulate = NUM_TFS_TO_MODULATE, 
+    prop_edges_to_enrich = 0.1
+  ) |> 
+  permute_edges(permutation_prop = 0.1) |> 
+  tidy_u() |> 
+  filter(abs(weight) > 0)
+
+# add "true" signal to TFs by removing edges from 10% of each TF's REs 
+u_3 <- 
+  u |> 
+  add_signal(
+    num_tfs_to_modulate = NUM_TFS_TO_MODULATE, 
+    prop_edges_to_enrich = 0, 
+    prop_edges_to_deplete = 0.1
+  ) |> 
+  permute_edges(permutation_prop = 0.1) |> 
+  tidy_u() |> 
+  filter(abs(weight) > 0)
+
+# add "true" signal to TFs by randomly permuting 20% of each TF's edges
+# (within each TF). Thus, 20% of the REs that a TF is connected to will change. 
+u_4 <- 
+  u |> 
+  add_signal(
+    num_tfs_to_modulate = NUM_TFS_TO_MODULATE, 
+    prop_edges_to_enrich = 0, 
+    prop_edges_to_deplete = 0, 
+    prop_edges_to_permute = 0.2
+  ) |> 
+  permute_edges(permutation_prop = 0.1) |> 
+  tidy_u() |> 
+  filter(abs(weight) > 0)
+```
+
+Here, we can appreciate in the each network that TFs vary in the number of edges they project to REs. 
+
+```{r}
+u_1 |> 
+  mutate(tf = factor(tf, levels = paste0("TF", 1:NUM_TFS))) |> 
+  filter(abs(weight) > 0) |> 
+  count(tf) 
+
+u_2 |> 
+  filter(abs(weight) > 0) |> 
+  mutate(tf = factor(tf, levels = paste0("TF", 1:NUM_TFS))) |> 
+  count(tf) 
+
+u_3 |> 
+  filter(abs(weight) > 0) |> 
+  mutate(tf = factor(tf, levels = paste0("TF", 1:NUM_TFS))) |> 
+  count(tf) 
+
+u_4 |> 
+  filter(abs(weight) > 0) |> 
+  mutate(tf = factor(tf, levels = paste0("TF", 1:NUM_TFS))) |> 
+  count(tf) 
+```
+
+
+## Build graphs 
+
+Using these edge lists, we can construct TF -> RE bipartite graphs representing each cell type. We use `build_graph()` to do so. 
+
+The graphs from each cell type are called `graph_1`, `graph_2`, `graph_3`, and `graph_4` respectively. 
+In addition, we construct a three additional graphs by subtracting the edges in `graph_1` from the edges in each of `graph_2`, `graph_3`, and `graph_4`: these graphs are called `graph_diff_12`, `graph_diff_13`, and `graph_diff_14` and represents the edge-subtraction graph of graphs 1 and 2, 3, and 4, respectively. To do this, we use `build_difference_graph()`. 
+
+The `build_graph()` function requires a u matrix, but can also accept an optional v matrix. If only a u matrix is supplied, `build_graph()` will create a TF->RE bipartite graph in which the weights for each TF->RE edge are equal to the corresponding entries in u. 
+
+If a v matrix is also supplied, then `build_graph()` will create a TF->TG bipartite graph in which each TF->TG pair is connected by either a single edge (if only one RE connects the TF and TG) or multiple edges (if multiple REs connect the TF and TG). The weight of each edge in the TF->TG graph is the product of the entry in u corresponding to the TF->RE edge and the entry in the v matrix corresponding to the RE->TG edge. 
+
+
+
+```{r make_graphs}
+# graph_1 <- build_graph(u = u_1)
+# graph_2 <- build_graph(u = u_2)
+# graph_3 <- build_graph(u = u_3)
+# graph_4 <- build_graph(u = u_4)
+
+graph_1 <- build_graph(u = u_1, v = v_tidy)
+graph_2 <- build_graph(u = u_2, v = v_tidy)
+graph_3 <- build_graph(u = u_3, v = v_tidy)
+graph_4 <- build_graph(u = u_4, v = v_tidy)
+
+# edge-subtracted graph for graphs 1 + 2 (edge enrichment)
+# graph_diff_12 <- 
+#   build_difference_graph(
+#     u_1 = u_1, 
+#     u_2 = u_2
+#   )
+
+graph_diff_12 <- 
+  build_difference_graph(
+    u_1 = u_1, 
+    u_2 = u_2, 
+    v_1 = v_tidy, 
+    v_2 = v_tidy
+  )
+
+# edge-subtracted graph for graphs 1 + 3 (edge depletion)
+graph_diff_13 <- 
+  build_difference_graph(
+    u_1 = u_1, 
+    u_2 = u_3, 
+    v_1 = v_tidy, 
+    v_2 = v_tidy
+  )
+
+# edge-subtracted graph for graphs 1 + 4 (edge permutation)
+graph_diff_14 <- 
+  build_difference_graph(
+    u_1 = u_1, 
+    u_2 = u_4, 
+    v_1 = v_tidy, 
+    v_2 = v_tidy
+  )
+```
+
+## Calculate centrality measurements for each TF
+
+Once we construct these graphs, we can then compute the (degree) centrality of each TF using `calculate_tf_centralities()`. 
+
+```{r}
+centralities_1 <- 
+  graph_1 |> 
+  calculate_tf_centralities()
+
+centralities_2 <- 
+  graph_2 |> 
+  calculate_tf_centralities()
+
+centralities_3 <- 
+  graph_3 |> 
+  calculate_tf_centralities()
+
+centralities_4 <- 
+  graph_4 |> 
+  calculate_tf_centralities()
+
+centralities_diff_12 <- 
+  graph_diff_12 |> 
+  calculate_tf_centralities()
+
+centralities_diff_13 <- 
+  graph_diff_13 |> 
+  calculate_tf_centralities()
+
+centralities_diff_14 <- 
+  graph_diff_14 |> 
+  calculate_tf_centralities()
+```
+
+
+## Make predictions: which TFs are different? 
+
+Using these centrality calculations for each TF, we can order the TFs according to most differential to least differential. We can do so either by subtracting the centrality of each TF in `graph_*` (where * indicates 2, 3, or 4) from its centrality in `graph_1` or by calculating the centrality of each TF in the edge-subtracted network in `graph_diff_*` (where * indicates 2, 3, or 4). We call the first of these approaches **centrality subtraction** and the second of these methods **edge subtraction**.
+
+Note that (at least for now) we use the degree centrality for these calculations (but this could be generalized to using any centrality measure). 
+
+```{r}
+# subtract centralities between graph_1 and graph_2
+prediction_1a <- 
+  make_predictions(
+    centralities_1 = centralities_1, 
+    centralities_2 = centralities_2
+  )
+
+# subtract centralities between graph_1 and graph_3
+prediction_1b <- 
+  make_predictions(
+    centralities_1 = centralities_1, 
+    centralities_2 = centralities_3
+  )
+
+# subtract centralities between graph_1 and graph_4
+prediction_1c <- 
+  make_predictions(
+    centralities_1 = centralities_1, 
+    centralities_2 = centralities_4
+  )
+
+# calculate centralities in the edge-subtracted networks for graphs 2-3
+prediction_2a <- make_predictions(centralities_diff = centralities_diff_12)
+prediction_2b <- make_predictions(centralities_diff = centralities_diff_13)
+prediction_2c <- make_predictions(centralities_diff = centralities_diff_14)
+```
+
+
+Using these ranked lists of TFs, we can calculate ROC curves for each approach (by varying the threshold where we separate differential vs. non-differential TFs). The `assess_differential_prediction()` functions does this. 
+
+First, we can plot the ROC curves for our predictions using centrality subtraction: 
+```{r}
+prediction_1a |> 
+  assess_differential_prediction(truth = truth) |> 
+  pluck("roc_plot") + 
+  labs(subtitle = "Centrality subtraction; edge enrichment")
+
+prediction_1b |> 
+  assess_differential_prediction(truth = truth)|> 
+  pluck("roc_plot") + 
+  labs(subtitle = "Centrality subtraction; edge depletion")
+
+prediction_1c |> 
+  assess_differential_prediction(truth = truth) |> 
+  pluck("roc_plot") + 
+  labs(subtitle = "Centrality subtraction; edge permutation")
+```
+
+Above, we can see that centrality subtraction performs relatively well for the first two types of signal (edge enrichment and edge depletion), but performs poorly for edge permutation (which makes sense, as edge permutation will not change a TF's degree centrality). 
+
+
+Next, we can plot the ROC curves for our predictions using edge subtraction: 
+
+```{r}
+prediction_2a |> 
+  assess_differential_prediction(truth = truth) |> 
+  pluck("roc_plot") + 
+  labs(subtitle = "Edge subtraction; edge enrichment")
+
+prediction_2b |> 
+  assess_differential_prediction(truth = truth) |> 
+  pluck("roc_plot") + 
+  labs(subtitle = "Edge subtraction; edge depletion")
+
+prediction_2c |> 
+  assess_differential_prediction(truth = truth) |> 
+  pluck("roc_plot") + 
+  labs(subtitle = "Edge subtraction; edge permutation")
+```
+
+In this case, we can see that edge subtraction performs about the same as centrality subtraction for the first two signal types (edge enrichment and edge depletion), but performs much better when edge permutation is the signal type distinguishing the two networks.
+
+# Varying noise 
+
+Using this general framework, we can see how each method performs as we vary the amount of noise (i.e. the percentage of permuted edges in the baseline network) for each of our signal types. 
+
+## Signal method: Edge enrichment
+
+We can vary the amount of noise we add to the networks while we keep the amount of edge enrichment signal fixed. Specifically, we vary the fraction of permuted edges in the networks (noise) from 0 to 0.5 while keeping the proportion of enriched edges for each modified TF at 0.15.
+
+First, we try centrality subtraction.
+
+```{r vary_noise_1}
+noise_results_enrich <- 
+  map(
+  .x = NOISE_SEQUENCE, 
+  .f = ~ 
+    run_full_simulation(
+      num_tfs = NUM_TFS, 
+      num_res = NUM_RES, 
+      num_tgs = NUM_TGS, 
+      permutation_prop = .x, 
+      num_tfs_to_modulate = NUM_TFS_TO_MODULATE, 
+      prop_edges_to_enrich = 0.1, 
+      difference_method = "centrality"
+    )
+)
+
+patches <- 
+  map2(
+  .x = noise_results_enrich, 
+  .y = NOISE_SEQUENCE, 
+  .f = ~ pluck(.x, "roc_plot") + 
+    labs(subtitle = paste0("Noise = ", .y))
+) |> 
+  wrap_plots(ncol = 4) &   
+  theme(
+    plot.caption = element_text(size = 6), 
+    plot.subtitle = element_text(size = 4.5), 
+    axis.title = element_text(size = 6), 
+    axis.text = element_text(size = 4)
+  )
+patches + 
+  plot_annotation(title = "centrality subtraction; edge enrichment") & 
+  theme(plot.title = element_text(size = 8))
+```
+
+
+We can see that model performance starts to degrade substantially around a noise level of 0.2.
+
+
+```{r}
+centrality_subtraction_enrich <- 
+  tibble(
+    noise_level = NOISE_SEQUENCE, 
+    auc = map_dbl(.x = noise_results_enrich, .f = ~ pluck(.x, "roc_auc")), 
+    method = "centrality subtraction"
+  )
+```
+
+Next, we try edge subtraction. 
+
+```{r vary_noise_2}
+noise_results_enrich_2 <- 
+  map(
+  .x = replace(NOISE_SEQUENCE, 1, 0.01), 
+  .f = ~ 
+    run_full_simulation(
+      num_tfs = NUM_TFS, 
+      num_res = NUM_RES, 
+      num_tgs = NUM_TGS, 
+      permutation_prop = .x, 
+      num_tfs_to_modulate = NUM_TFS_TO_MODULATE, 
+      prop_edges_to_enrich = 0.1, 
+      difference_method = "edge"
+    )
+  )
+
+patches <- 
+  map2(
+  .x = noise_results_enrich_2, 
+  .y = replace(NOISE_SEQUENCE, 1, 0.01), 
+  .f = ~ pluck(.x, "roc_plot") + 
+    labs(subtitle = paste0("Noise = ", .y))
+) |> 
+  wrap_plots(ncol = 4) &   
+  theme(
+    plot.caption = element_text(size = 5), 
+    plot.subtitle = element_text(size = 4.5), 
+    axis.title = element_text(size = 6), 
+    axis.text = element_text(size = 4)
+  )
+patches + 
+  plot_annotation(title = "edge subtraction; edge enrichment") & 
+  theme(plot.title = element_text(size = 8))
+```
+
+
+And we can see that edge subtraction starts to degrade in performance at a similar level of noise. 
+
+```{r vary_noise_3}
+edge_subtraction_enrich <- 
+  tibble(
+  noise_level = seq(0.01, 0.51, 0.05), 
+  auc = map_dbl(.x = noise_results_enrich_2, .f = ~ pluck(.x, "roc_auc")), 
+  method = "edge subtraction"
+) 
+
+centrality_subtraction_enrich |> 
+  bind_rows(edge_subtraction_enrich) |> 
+  ggplot(aes(x = noise_level, y = auc, fill = method)) + 
+  geom_line() + 
+  geom_point(size = 3, shape = 21) + 
+  scale_y_continuous(limits = c(0, 1)) + 
+  theme_bw() + 
+  labs(subtitle = "ROC AUC as a function of noise (Signal method: edge enrichment)")
+```
+
+And this summary plot shows that the ROC AUC doesn't differ much between the two methods for edge enrichment.
+
+## Signal method: Edge depletion
+
+We perform the same analysis for edge depletion, first with centrality subtraction.
+
+```{r vary_noise_4}
+noise_results_deplete <- 
+  map(
+  .x = NOISE_SEQUENCE, 
+  .f = ~ 
+    run_full_simulation(
+      num_tfs = NUM_TFS, 
+      num_res = NUM_RES, 
+      num_tgs = NUM_TGS, 
+      permutation_prop = .x, 
+      num_tfs_to_modulate = NUM_TFS_TO_MODULATE, 
+      prop_edges_to_enrich = 0,
+      prop_edges_to_deplete = 0.1,
+      difference_method = "centrality"
+    )
+)
+
+patches <- 
+  map2(
+  .x = noise_results_deplete, 
+  .y = NOISE_SEQUENCE, 
+  .f = ~ pluck(.x, "roc_plot") + 
+    labs(subtitle = paste0("Noise = ", .y))
+) |> 
+  wrap_plots(ncol = 4) &   
+  theme(
+    plot.caption = element_text(size = 6), 
+    plot.subtitle = element_text(size = 4.5), 
+    axis.title = element_text(size = 6), 
+    axis.text = element_text(size = 4)
+  )
+patches + 
+  plot_annotation(title = "centrality subtraction; edge depletion") & 
+  theme(plot.title = element_text(size = 8))
+```
+
+```{r}
+centrality_subtraction_deplete <- 
+  tibble(
+    noise_level = NOISE_SEQUENCE, 
+    auc = map_dbl(.x = noise_results_deplete, .f = ~ pluck(.x, "roc_auc")), 
+    method = "centrality subtraction"
+  )
+```
+
+
+And then edge subtraction...
+
+```{r vary_noise_5}
+noise_results_deplete_2 <- 
+  map(
+  .x = replace(NOISE_SEQUENCE, 1, 0.01), 
+  .f = ~ 
+    run_full_simulation(
+      num_tfs = NUM_TFS, 
+      num_res = NUM_RES, 
+      num_tgs = NUM_TGS, 
+      permutation_prop = .x, 
+      num_tfs_to_modulate = NUM_TFS_TO_MODULATE, 
+      prop_edges_to_enrich = 0,
+      prop_edges_to_deplete = 0.1, 
+      difference_method = "edge"
+    )
+)
+
+patches <- 
+  map2(
+  .x = noise_results_deplete_2, 
+  .y = replace(NOISE_SEQUENCE, 1, 0.01), 
+  .f = ~ pluck(.x, "roc_plot") + 
+    labs(subtitle = paste0("Noise = ", .y))
+) |> 
+  wrap_plots(ncol = 4) &   
+  theme(
+    plot.caption = element_text(size = 5), 
+    plot.subtitle = element_text(size = 4.5), 
+    axis.title = element_text(size = 6), 
+    axis.text = element_text(size = 4)
+  )
+patches + 
+  plot_annotation(title = "edge subtraction; edge depletion") & 
+  theme(plot.title = element_text(size = 8))
+```
+
+```{r vary_noise_6}
+edge_subtraction_deplete <- 
+  tibble(
+  noise_level = seq(0.01, 0.51, 0.05), 
+  auc = map_dbl(.x = noise_results_deplete_2, .f = ~ pluck(.x, "roc_auc")), 
+  method = "edge subtraction"
+) 
+
+centrality_subtraction_deplete |> 
+  bind_rows(edge_subtraction_deplete) |> 
+  ggplot(aes(x = noise_level, y = auc, fill = method)) + 
+  geom_line() + 
+  geom_point(size = 3, shape = 21) + 
+  scale_y_continuous(limits = c(0, 1)) + 
+  theme_bw() + 
+  labs(subtitle = "ROC AUC as a function of noise (Signal method: edge depletion)")
+```
+
+
+And once again we can see that the methods perform similarly when the signal is edge depletion.
+
+## Signal method: Edge permutation
+
+And finally we can perform the same analysis with an edge permutation signal. First, we use centrality subtraction: 
+
+```{r vary_noise_7}
+noise_results_permute <- 
+  map(
+  .x = NOISE_SEQUENCE, 
+  .f = ~ 
+    run_full_simulation(
+      num_tfs = NUM_TFS, 
+      num_res = NUM_RES, 
+      num_tgs = NUM_TGS, 
+      permutation_prop = .x, 
+      num_tfs_to_modulate = NUM_TFS_TO_MODULATE, 
+      prop_edges_to_enrich = 0,
+      prop_edges_to_permute = 0.1,
+      difference_method = "centrality"
+    )
+)
+
+patches <- 
+  map2(
+  .x = noise_results_permute, 
+  .y = NOISE_SEQUENCE, 
+  .f = ~ pluck(.x, "roc_plot") + 
+    labs(subtitle = paste0("Noise = ", .y))
+) |> 
+  wrap_plots(ncol = 4) &   
+  theme(
+    plot.caption = element_text(size = 6), 
+    plot.subtitle = element_text(size = 4.5), 
+    axis.title = element_text(size = 6), 
+    axis.text = element_text(size = 4)
+  )
+patches + 
+  plot_annotation(title = "centrality subtraction; edge permutation") & 
+  theme(plot.title = element_text(size = 8))
+
+```
+
+Again, we can see that even with low levels of noise, centrality subtraction performs poorly at detecting edge permutation signals. 
+
+```{r}
+centrality_subtraction_permute <- 
+  tibble(
+    noise_level = NOISE_SEQUENCE, 
+    auc = map_dbl(.x = noise_results_permute, .f = ~ pluck(.x, "roc_auc")), 
+    method = "centrality subtraction"
+  )
+```
+
+
+```{r vary_noise_8}
+noise_results_permute_2 <- 
+  map(
+  .x = replace(NOISE_SEQUENCE, 1, 0.01), 
+  .f = ~ 
+    run_full_simulation(
+      num_tfs = NUM_TFS, 
+      num_res = NUM_RES, 
+      num_tgs = NUM_TGS, 
+      permutation_prop = .x, 
+      num_tfs_to_modulate = NUM_TFS_TO_MODULATE, 
+      prop_edges_to_enrich = 0,
+      prop_edges_to_permute = 0.1, 
+      difference_method = "edge"
+    )
+)
+
+patches <- 
+  map2(
+  .x = noise_results_permute_2, 
+  .y = replace(NOISE_SEQUENCE, 1, 0.01), 
+  .f = ~ pluck(.x, "roc_plot") + 
+    labs(subtitle = paste0("Noise = ", .y))
+) |> 
+  wrap_plots(ncol = 4) &   
+  theme(
+    plot.caption = element_text(size = 5), 
+    plot.subtitle = element_text(size = 4.5), 
+    axis.title = element_text(size = 6), 
+    axis.text = element_text(size = 4)
+  )
+patches + 
+  plot_annotation(title = "edge subtraction; edge permutation") & 
+  theme(plot.title = element_text(size = 8))
+```
+
+
+By contrast, edge subtraction performs well until a noise level of around 0.25. And this is summarized in the following plot: 
+
+
+```{r}
+edge_subtraction_permute <- 
+  tibble(
+  noise_level = seq(0.01, 0.51, 0.05), 
+  auc = map_dbl(.x = noise_results_permute_2, .f = ~ pluck(.x, "roc_auc")), 
+  method = "edge subtraction"
+) 
+
+centrality_subtraction_permute |> 
+  bind_rows(edge_subtraction_permute) |> 
+  ggplot(aes(x = noise_level, y = auc, fill = method)) + 
+  geom_line() + 
+  geom_point(size = 3, shape = 21) + 
+  scale_y_continuous(limits = c(0, 1)) + 
+  theme_bw() + 
+  labs(subtitle = "ROC AUC as a function of noise (Signal method: edge permutation)")
+```
+
+# Varying signal
+
+We can also vary the amount of signal for each of our signaling methods (while keeping noise constant) to get an idea of how much signal must be present to detect differential TFs. 
+
+Specifically, we fix our number of permuted edges at 0.1 and vary signal from 0 to 0.5 enriched, depleted, or permuted edges. 
+
+## Signal method: Edge enrichment
+
+```{r vary_signal_1}
+signal_results_enrich <- 
+  map(
+    .x = SIGNAL_SEQUENCE, 
+    .f = ~ 
+      run_full_simulation(
+        num_tfs = NUM_TFS, 
+        num_res = NUM_RES, 
+        num_tgs = NUM_TGS, 
+        permutation_prop = 0.1, 
+        prop_edges_to_enrich = .x, 
+        difference_method = "centrality"
+      )
+  )
+
+patches <-
+  map2(
+  .x = signal_results_enrich, 
+  .y = SIGNAL_SEQUENCE, 
+  .f = ~ pluck(.x, "roc_plot") + 
+    labs(subtitle = paste0("Signal = ", .y))
+) |> 
+  wrap_plots(ncol = 4) &   
+  theme(
+    plot.caption = element_text(size = 5), 
+    plot.subtitle = element_text(size = 4.5), 
+    axis.title = element_text(size = 6), 
+    axis.text = element_text(size = 4)
+  )
+patches + 
+  plot_annotation(title = "centrality subtraction; edge enrichment") & 
+  theme(plot.title = element_text(size = 8))
+
+centrality_subtraction_enrich <- 
+  tibble(
+  signal_level = SIGNAL_SEQUENCE, 
+  auc = map_dbl(.x = signal_results_enrich, .f = ~ pluck(.x, "roc_auc")), 
+  method = "centrality subtraction"
+)
+
+signal_results_enrich_2 <- 
+  map(
+    .x = SIGNAL_SEQUENCE, 
+    .f = ~ 
+      run_full_simulation(
+        num_tfs = NUM_TFS, 
+        num_res = NUM_RES, 
+        num_tgs = NUM_TGS, 
+        permutation_prop = 0.1, 
+        prop_edges_to_enrich = .x, 
+        difference_method = "edge"
+      )
+  )
+
+patches <- 
+  map2(
+  .x = signal_results_enrich_2, 
+  .y = SIGNAL_SEQUENCE, 
+  .f = ~ pluck(.x, "roc_plot") + 
+    labs(subtitle = paste0("Signal = ", .y))
+) |> 
+  wrap_plots(ncol = 4) &   
+  theme(
+    plot.caption = element_text(size = 5), 
+    plot.subtitle = element_text(size = 4.5), 
+    axis.title = element_text(size = 6), 
+    axis.text = element_text(size = 4)
+  )
+patches + 
+  plot_annotation(title = "edge subtraction; edge enrichment") & 
+  theme(plot.title = element_text(size = 8))
+
+
+edge_subtraction_enrich <- 
+  tibble(
+  signal_level = SIGNAL_SEQUENCE, 
+  auc = map_dbl(.x = signal_results_enrich_2, .f = ~ pluck(.x, "roc_auc")), 
+  method = "edge subtraction"
+)
+```
+
+```{r}
+centrality_subtraction_enrich |> 
+  bind_rows(edge_subtraction_enrich) |> 
+  ggplot(aes(x = signal_level, y = auc, fill = method)) + 
+  geom_line() + 
+  geom_point(size = 3, shape = 21) + 
+  scale_y_continuous(limits = c(0, 1)) + 
+  theme_bw() + 
+  labs(subtitle = "ROC AUC as a function of signal (Signal method: edge enrichment)")
+```
+
+
+So we can see that edge subtraction may perform slightly better than centrality subtraction at lower levels of signal for edge enrichment. 
+
+
+## Signal method: Edge depletion
+
+```{r vary_signal_2}
+signal_results_deplete <- 
+  map(
+    .x = SIGNAL_SEQUENCE, 
+    .f = ~ 
+      run_full_simulation(
+        num_tfs = NUM_TFS, 
+        num_res = NUM_RES, 
+        num_tgs = NUM_TGS, 
+        permutation_prop = 0.1, 
+        prop_edges_to_enrich = 0, 
+        prop_edges_to_deplete = .x, 
+        difference_method = "centrality"
+      )
+  )
+
+patches <- 
+  map2(
+  .x = signal_results_deplete, 
+  .y = SIGNAL_SEQUENCE, 
+  .f = ~ pluck(.x, "roc_plot") + 
+    labs(subtitle = paste0("Signal = ", .y))
+) |> 
+  wrap_plots(ncol = 4) &   
+  theme(
+    plot.caption = element_text(size = 5), 
+    plot.subtitle = element_text(size = 4.5), 
+    axis.title = element_text(size = 6), 
+    axis.text = element_text(size = 4)
+  )
+patches + 
+  plot_annotation(title = "centrality subtraction; edge depletion") & 
+  theme(plot.title = element_text(size = 8))
+
+centrality_subtraction_deplete <- 
+  tibble(
+  signal_level = SIGNAL_SEQUENCE, 
+  auc = map_dbl(.x = signal_results_deplete, .f = ~ pluck(.x, "roc_auc")), 
+  method = "centrality subtraction"
+)
+
+signal_results_deplete_2 <- 
+  map(
+    .x = SIGNAL_SEQUENCE, 
+    .f = ~ 
+      run_full_simulation(
+        num_tfs = NUM_TFS, 
+        num_res = NUM_RES, 
+        num_tgs = NUM_TGS, 
+        permutation_prop = 0.1, 
+        prop_edges_to_enrich = 0, 
+        prop_edges_to_deplete = .x, 
+        difference_method = "edge"
+      )
+  )
+
+patches <- 
+  map2(
+  .x = signal_results_deplete_2, 
+  .y = SIGNAL_SEQUENCE, 
+  .f = ~ pluck(.x, "roc_plot") + 
+    labs(subtitle = paste0("Signal = ", .y))
+) |> 
+  wrap_plots(ncol = 4) &   
+  theme(
+    plot.caption = element_text(size = 5), 
+    plot.subtitle = element_text(size = 4.5), 
+    axis.title = element_text(size = 6), 
+    axis.text = element_text(size = 4)
+  )
+patches + 
+  plot_annotation(title = "edge subtraction; edge depletion") & 
+  theme(plot.title = element_text(size = 8))
+
+
+edge_subtraction_deplete <- 
+  tibble(
+    signal_level = SIGNAL_SEQUENCE, 
+    auc = map_dbl(.x = signal_results_deplete_2, .f = ~ pluck(.x, "roc_auc")), 
+    method = "edge subtraction"
+  )
+```
+
+And we have a similar result for edge depletion.
+
+```{r}
+centrality_subtraction_deplete |> 
+  bind_rows(edge_subtraction_deplete) |> 
+  ggplot(aes(x = signal_level, y = auc, fill = method)) + 
+  geom_line() + 
+  geom_point(size = 3, shape = 21) + 
+  scale_y_continuous(limits = c(0, 1)) + 
+  theme_bw() + 
+  labs(subtitle = "ROC AUC as a function of signal (Signal method: edge depletion)")
+```
+
+## Signal method: Edge permutation
+
+```{r vary_signal_3}
+signal_results_permute <- 
+  map(
+    .x = SIGNAL_SEQUENCE, 
+    .f = ~ 
+      run_full_simulation(
+        num_tfs = NUM_TFS, 
+        num_res = NUM_RES, 
+        num_tgs = NUM_TGS, 
+        permutation_prop = 0.1, 
+        prop_edges_to_enrich = 0, 
+        prop_edges_to_permute = .x, 
+        difference_method = "centrality"
+      )
+  )
+
+patches <- 
+  map2(
+  .x = signal_results_permute, 
+  .y = SIGNAL_SEQUENCE, 
+  .f = ~ pluck(.x, "roc_plot") + 
+    labs(subtitle = paste0("Signal = ", .y))
+) |> 
+  wrap_plots(ncol = 4) &   
+  theme(
+    plot.caption = element_text(size = 5), 
+    plot.subtitle = element_text(size = 4.5), 
+    axis.title = element_text(size = 6), 
+    axis.text = element_text(size = 4)
+  )
+patches + 
+  plot_annotation(title = "centrality subtraction; edge permutation") & 
+  theme(plot.title = element_text(size = 8))
+
+centrality_subtraction_permute <- 
+  tibble(
+  signal_level = SIGNAL_SEQUENCE, 
+  auc = map_dbl(.x = signal_results_permute, .f = ~ pluck(.x, "roc_auc")), 
+  method = "centrality subtraction"
+)
+
+signal_results_permute_2 <- 
+  map(
+    .x = SIGNAL_SEQUENCE, 
+    .f = ~ 
+      run_full_simulation(
+        num_tfs = NUM_TFS, 
+        num_res = NUM_RES, 
+        num_tgs = NUM_TGS, 
+        permutation_prop = 0.1, 
+        prop_edges_to_enrich = 0, 
+        prop_edges_to_permute = .x, 
+        difference_method = "edge"
+      )
+  )
+
+patches <- 
+  map2(
+  .x = signal_results_permute_2, 
+  .y = SIGNAL_SEQUENCE, 
+  .f = ~ pluck(.x, "roc_plot") + 
+    labs(subtitle = paste0("Signal = ", .y))
+) |> 
+  wrap_plots(ncol = 4) &   
+  theme(
+    plot.caption = element_text(size = 5), 
+    plot.subtitle = element_text(size = 4.5), 
+    axis.title = element_text(size = 6), 
+    axis.text = element_text(size = 4)
+  )
+patches + 
+  plot_annotation(title = "edge subtraction; edge permutation") & 
+  theme(plot.title = element_text(size = 8))
+
+
+edge_subtraction_permute <- 
+  tibble(
+  signal_level = SIGNAL_SEQUENCE, 
+  auc = map_dbl(.x = signal_results_permute_2, .f = ~ pluck(.x, "roc_auc")), 
+  method = "edge subtraction"
+)
+```
+
+```{r}
+centrality_subtraction_permute |> 
+  bind_rows(edge_subtraction_permute) |> 
+  ggplot(aes(x = signal_level, y = auc, fill = method)) + 
+  geom_line() + 
+  geom_point(size = 3, shape = 21) + 
+  scale_y_continuous(limits = c(0, 1)) + 
+  theme_bw() + 
+  labs(subtitle = "ROC AUC as a function of signal (Signal method: edge permutation)")
+```
+
+
+And of course there is much better performance for edge subtraction (relative to centrality subtraction) for detecting signals in the form of edge permutation.
+
+
+```{r, echo = FALSE}
+knitr::knit_exit()
+```
+
+
+
+
+# Null distributions 
+
+
+
+```{r}
+# takes <3 minutes with 100 TFs
+start <- Sys.time()
+num_null_replicates <- 1000
+
+# list of edge lists for all replicates
+u_list <- 
+  map(
+    .x = 1:num_null_replicates,
+    .f = ~ permute_edges(weight_matrix = u, permutation_prop = 0.1)
+  ) |> 
+  map(.f = tidy_u) |> 
+  map(.f = ~ filter(.x, abs(weight) > 0))
+
+# for each member of the u_list, calculate the difference in centralities 
+# for each TF between u_1 and the member of u_list.
+# results in a tibble that has the following columns: 
+#    - node_name: string indicating TF name
+#    - degree_diff: numeric value indicating the difference in degree btw 
+#                   the TF in graph_1 and graph_2
+#    - replicate: integer indicating which replicate a row is in
+prediction_tibble <- 
+  u_list |> 
+  map(.f = build_graph) |> 
+  map(.f = calculate_tf_centralities) |> 
+  map2_dfr(
+    .y = 1:num_null_replicates, 
+    .f = ~ 
+      make_predictions(centralities_1 = centralities_1, centralities_2 = .x) |> 
+      mutate(replicate = .y)
+  ) |> 
+  select(-.pred, -p_value)
+
+diff_prediction_tibble <- 
+  u_list |> 
+  map(
+    .f = ~ 
+      build_difference_graph(
+        u_1 = u_1, 
+        u_2 = .x, 
+        from_col = tf, 
+        to_col = re, 
+        metadata_cols = c(edge_type, edge_id)
+      )
+  ) |> 
+  map(.f = calculate_tf_centralities) |> 
+  map2_dfr(
+    .y = 1:num_null_replicates, 
+    .f = ~ 
+      make_predictions(centralities_diff = .x) |> 
+      mutate(replicate = .y)
+  )
+
+end <- Sys.time()
+
+end - start
+```
+
+```{r}
+# compute TF-specific null distributions (twice) for each method 
+start <- Sys.time()
+centrality_null_1 <- 
+  compute_null_distributions(weight_matrix = u, num_replicates = 200)
+centrality_null_2 <- 
+  compute_null_distributions(weight_matrix = u, num_replicates = 200)
+
+edge_null_1 <- 
+  compute_null_distributions(
+    weight_matrix = u, 
+    num_replicates = 1000, 
+    difference_method = "edge"
+  )
+edge_null_2 <- 
+  compute_null_distributions(
+    weight_matrix = u, 
+    num_replicates = 1000, 
+    difference_method = "edge"
+  )
+end <- Sys.time()
+
+print(end - start)
+```
+
+
+```{r}
+# edge enrichment using centrality subtraction
+centrality_result_12a <- 
+  compare_networks(
+    edge_list_1 = u_1, 
+    edge_list_2 = u_2, 
+    difference_method = "centrality", 
+    null_distributions = centrality_null_1
+  )
+
+centrality_result_12b <- 
+  compare_networks(
+    edge_list_1 = u_1, 
+    edge_list_2 = u_2, 
+    difference_method = "centrality", 
+    null_distributions = centrality_null_2
+  )
+
+centrality_result_12a |> 
+  arrange(p_value_null) |> 
+  #slice_head(n = 30) |> 
+  arrange(factor(node_name, levels = paste0("TF", 1:NUM_TFS))) |> 
+  ggplot(aes(x = p_value_null)) + 
+  geom_histogram()
+
+centrality_result_12b |> 
+  ggplot(aes(x = p_value_null)) + 
+  geom_histogram()
+
+centrality_result_12a |> 
+  plot_roc_curve(pred_col = degree_diff, truth = truth) + 
+  labs(subtitle = "Raw degree difference 1")
+
+centrality_result_12b |> 
+  plot_roc_curve(pred_col = degree_diff, truth = truth) + 
+  labs(subtitle = "Raw degree difference 2")
+
+centrality_result_12a |> 
+  mutate(score = 1 - p_value_null) |> 
+  plot_roc_curve(pred_col = score, truth = truth) + 
+  labs(subtitle = "p-value 1")
+
+centrality_result_12b |> 
+  mutate(score = 1 - p_value_null) |> 
+  plot_roc_curve(pred_col = score, truth = truth) + 
+  labs(subtitle = "p-value 2")
+```
+
+```{r}
+# edge depletion using centrality subtraction
+centrality_result_13a <- 
+  compare_networks(
+    edge_list_1 = u_1, 
+    edge_list_2 = u_3, 
+    difference_method = "centrality", 
+    null_distributions = centrality_null_1
+  )
+
+centrality_result_13b <- 
+  compare_networks(
+    edge_list_1 = u_1, 
+    edge_list_2 = u_3, 
+    difference_method = "centrality", 
+    null_distributions = centrality_null_2
+  )
+
+
+# p-value histograms
+centrality_result_13a |> 
+  arrange(p_value_null) |> 
+  #slice_head(n = 30) |> 
+  arrange(factor(node_name, levels = paste0("TF", 1:NUM_TFS))) |> 
+  ggplot(aes(x = p_value_null)) + 
+  geom_histogram()
+
+centrality_result_13b |> 
+  ggplot(aes(x = p_value_null)) + 
+  geom_histogram()
+
+
+# roc curves 
+centrality_result_13a |> 
+  mutate(score = 1 - p_value) |> 
+  plot_roc_curve(pred_col = score, truth = truth) + 
+  labs(subtitle = "Raw degree difference 1")
+
+centrality_result_13b |> 
+  mutate(score = 1 - p_value) |> 
+  plot_roc_curve(pred_col = score, truth = truth) + 
+  labs(subtitle = "Raw degree difference 2")
+
+centrality_result_13a |> 
+  mutate(score = 1 - p_value_null) |> 
+  plot_roc_curve(pred_col = score, truth = truth) + 
+  labs(subtitle = "p-value 1")
+
+centrality_result_13b |> 
+  mutate(score = 1 - p_value_null) |> 
+  plot_roc_curve(pred_col = score, truth = truth) + 
+  labs(subtitle = "p-value 2")
+
+```
+
+
+```{r}
+# edge permutation via centrality subtraction
+centrality_result_14a <- 
+  compare_networks(
+    edge_list_1 = u_1, 
+    edge_list_2 = u_4, 
+    difference_method = "centrality", 
+    null_distributions = centrality_null_1
+  )
+
+centrality_result_14b <- 
+  compare_networks(
+    edge_list_1 = u_1, 
+    edge_list_2 = u_4, 
+    difference_method = "centrality", 
+    null_distributions = centrality_null_2
+  )
+
+# p-value histograms
+centrality_result_14a |> 
+  arrange(p_value_null) |> 
+  #slice_head(n = 30) |> 
+  arrange(factor(node_name, levels = paste0("TF", 1:NUM_TFS))) |> 
+  ggplot(aes(x = p_value_null)) + 
+  geom_histogram()
+
+centrality_result_14b |> 
+  ggplot(aes(x = p_value_null)) + 
+  geom_histogram()
+
+
+# roc curves 
+centrality_result_14a |> 
+  mutate(score = 1 - p_value) |> 
+  plot_roc_curve(pred_col = score, truth = truth) + 
+  labs(subtitle = "Raw degree difference 1")
+
+centrality_result_14b |> 
+  mutate(score = 1 - p_value) |> 
+  plot_roc_curve(pred_col = score, truth = truth) + 
+  labs(subtitle = "Raw degree difference 2")
+
+centrality_result_14a |> 
+  mutate(score = 1 - p_value_null) |> 
+  plot_roc_curve(pred_col = score, truth = truth) + 
+  labs(subtitle = "p-value 1")
+
+centrality_result_14b |> 
+  mutate(score = 1 - p_value_null) |> 
+  plot_roc_curve(pred_col = score, truth = truth) + 
+  labs(subtitle = "p-value 2")
+
+```
+
+
+```{r}
+# edge enrichment detection via edge subtration
+edge_result_12a <- 
+  compare_networks(
+    edge_list_1 = u_1, 
+    edge_list_2 = u_2, 
+    difference_method = "edge", 
+    null_distributions = edge_null_1
+  )
+
+edge_result_12b <- 
+  compare_networks(
+    edge_list_1 = u_1, 
+    edge_list_2 = u_2, 
+    difference_method = "edge", 
+    null_distributions = edge_null_2
+  )
+
+# p-value histograms
+edge_result_12a |> 
+  arrange(p_value_null) |> 
+  #slice_head(n = 30) |> 
+  arrange(factor(node_name, levels = paste0("TF", 1:NUM_TFS))) |> 
+  ggplot(aes(x = p_value_null)) + 
+  geom_histogram()
+
+edge_result_12b |> 
+  ggplot(aes(x = p_value_null)) + 
+  geom_histogram()
+
+
+# roc curves 
+edge_result_12a |> 
+  mutate(score = 1 - p_value) |> 
+  plot_roc_curve(pred_col = score, truth = truth) + 
+  labs(subtitle = "Raw degree in edge-subtracted network 1")
+
+edge_result_12b |> 
+  mutate(score = 1 - p_value) |> 
+  plot_roc_curve(pred_col = score, truth = truth) + 
+  labs(subtitle = "Raw degree in edge-subtracted network 2")
+
+edge_result_12a |> 
+  mutate(score = 1 - p_value_null) |> 
+  plot_roc_curve(pred_col = score, truth = truth) + 
+  labs(subtitle = "p-value 1")
+
+edge_result_12b |> 
+  mutate(score = 1 - p_value_null) |> 
+  plot_roc_curve(pred_col = score, truth = truth) + 
+  labs(subtitle = "p-value 2")
+
+```
+
+
+
+```{r}
+# edge depletion detection via edge subtraction 
+edge_result_13a <- 
+  compare_networks(
+    edge_list_1 = u_1, 
+    edge_list_2 = u_3, 
+    difference_method = "edge", 
+    null_distributions = edge_null_1
+  )
+
+edge_result_13b <- 
+  compare_networks(
+    edge_list_1 = u_1, 
+    edge_list_2 = u_3, 
+    difference_method = "edge", 
+    null_distributions = edge_null_2
+  )
+
+
+# roc curves 
+edge_result_13a |> 
+  mutate(score = 1 - p_value) |> 
+  plot_roc_curve(pred_col = score, truth = truth) + 
+  labs(subtitle = "Raw degree in edge-subtracted network 1")
+
+edge_result_13b |> 
+  mutate(score = 1 - p_value) |> 
+  plot_roc_curve(pred_col = score, truth = truth) + 
+  labs(subtitle = "Raw degree in edge-subtracted network 2")
+
+edge_result_13a |> 
+  mutate(score = 1 - p_value_null) |> 
+  plot_roc_curve(pred_col = score, truth = truth) + 
+  labs(subtitle = "p-value 1")
+
+edge_result_13b |> 
+  mutate(score = 1 - p_value_null) |> 
+  plot_roc_curve(pred_col = score, truth = truth) + 
+  labs(subtitle = "p-value 2")
+
+```
+
+```{r}
+# edge permutation detection via edge subtraction
+edge_result_14a <- 
+  compare_networks(
+    edge_list_1 = u_1, 
+    edge_list_2 = u_4, 
+    difference_method = "edge", 
+    null_distributions = edge_null_1
+  )
+
+edge_result_14b <- 
+  compare_networks(
+    edge_list_1 = u_1, 
+    edge_list_2 = u_4, 
+    difference_method = "edge", 
+    null_distributions = edge_null_2
+  )
+
+edge_result_14a |> 
+  mutate(score = 1 - p_value) |> 
+  plot_roc_curve(pred_col = score, truth = truth) + 
+  labs(subtitle = "Raw degree in edge-subtracted network 1")
+
+edge_result_14b |> 
+  mutate(score = 1 - p_value) |> 
+  plot_roc_curve(pred_col = score, truth = truth) + 
+  labs(subtitle = "Raw degree in edge-subtracted network 2")
+
+edge_result_14a |> 
+  mutate(score = 1 - p_value_null) |> 
+  plot_roc_curve(pred_col = score, truth = truth) + 
+  labs(subtitle = "p-value 1")
+
+edge_result_14b |> 
+  mutate(score = 1 - p_value_null) |> 
+  plot_roc_curve(pred_col = score, truth = truth) + 
+  labs(subtitle = "p-value 2")
+
+```
+
+
+```{r}
+edge_result_negative_control_a <- 
+  compare_networks(
+    edge_list_1 = u_1, 
+    edge_list_2 = permute_edges(u) |> tidy_u(), 
+    difference_method = "edge", 
+    null_distributions = edge_null_1
+  )
+
+edge_result_negative_control_b <- 
+  compare_networks(
+    edge_list_1 = u_1, 
+    edge_list_2 = permute_edges(u) |> tidy_u(), 
+    difference_method = "edge", 
+    null_distributions = edge_null_2
+  )
+
+edge_result_negative_control_a |> 
+  mutate(score = 1 - p_value) |> 
+  plot_roc_curve(pred_col = score, truth = truth) + 
+  labs(subtitle = "Raw degree in edge-subtracted network 1")
+
+edge_result_negative_control_b |> 
+  mutate(score = 1 - p_value) |> 
+  plot_roc_curve(pred_col = score, truth = truth) + 
+  labs(subtitle = "Raw degree in edge-subtracted network 2")
+
+edge_result_negative_control_a |> 
+  mutate(score = 1 - p_value_null) |> 
+  plot_roc_curve(pred_col = score, truth = truth) + 
+  labs(subtitle = "p-value 1")
+
+edge_result_negative_control_b |> 
+  mutate(score = 1 - p_value_null) |> 
+  plot_roc_curve(pred_col = score, truth = truth) + 
+  labs(subtitle = "p-value 2")
+
+```
+
+
+```{r, eval = FALSE}
+# centrality differences 
+raw_roc_curve <- 
+  _____ |> 
+  left_join(truth, by = "node_name") |> 
+  mutate(
+    is_differential = fct_rev(as.factor(is_differential)),
+    score = 1 - p_value
+  ) |> 
+  left_join(_____, by = "node_name") |> 
+  mutate(node_name = factor(node_name, levels = paste0("TF", 1:nrow(temp_2)))) |> 
+  arrange(node_name)
+
+plot_tibble <- 
+  raw_roc_curve |> 
+  group_by(is_differential) |> 
+  slice_sample(n = 15) |> 
+  ungroup()
+
+map2(
+  #.x = abs(plot_tibble$degree_diff), 
+  .x = abs(plot_tibble$degree),
+  .y = plot_tibble$null_distribution, 
+  .f = ~ 
+    ggplot(aes(x = abs(.y)), data = NULL) + 
+    geom_histogram(bins = 30) + 
+    geom_vline(xintercept = .x)
+) |> 
+  map2(.y = 1:nrow(plot_tibble), .f = ~ .x + labs(subtitle = paste0("Plot", .y))) |> 
+  walk(.f = print)
+
+```
+
+```{r, eval = FALSE}
+raw_auc <- 
+  raw_roc_curve |> 
+  yardstick::roc_auc(score, truth = is_differential) |> 
+  pull(.estimate) |> 
+  round(4)
+
+raw_roc_curve |> 
+  yardstick::roc_curve(
+    score, 
+    truth = is_differential
+  ) |> 
+  autoplot() + 
+  labs(subtitle = "Using raw values", caption = paste0("ROC AUC: ", raw_auc))
+
+
+null_roc_curve <- 
+  temp_4 |> 
+  left_join(truth, by = "node_name") |> 
+  mutate(
+    is_differential = fct_rev(as.factor(is_differential)),
+    score = 1 - p_value_null
+  )
+
+raw_auc <- 
+  null_roc_curve |> 
+  yardstick::roc_auc(score, truth = is_differential) |> 
+  pull(.estimate) |> 
+  round(4)
+
+null_roc_curve |> 
+  yardstick::roc_curve(
+    score, 
+    truth = is_differential
+  ) |> 
+  autoplot() + 
+  labs(subtitle = "Using p-values", caption = paste0("ROC AUC: ", raw_auc))
+```
+
+
+
+```{r, eval = FALSE}
+# edge subtraction
+raw_roc_curve <- 
+  temp_2 |> 
+  left_join(truth, by = "node_name") |> 
+  mutate(
+    is_differential = fct_rev(as.factor(is_differential)),
+    score = 1 - p_value
+  ) |> 
+  left_join(temp, by = "node_name") |> 
+  mutate(node_name = factor(node_name, levels = paste0("TF", 1:nrow(temp_2)))) |> 
+  arrange(node_name)
+
+map2(
+  .x = abs(raw_roc_curve$degree_diff), 
+  .y = raw_roc_curve$null_distribution, 
+  .f = ~ 
+    ggplot(aes(x = abs(.y)), data = NULL) + 
+    geom_histogram() + 
+    geom_vline(xintercept = .x)
+) |> 
+  map2(.y = 1:nrow(raw_roc_curve), .f = ~ .x + labs(subtitle = paste0("TF", .y))) |> 
+  walk(.f = print)
+
+```
+
+```{r, eval = FALSE}
+raw_auc <- 
+  raw_roc_curve |> 
+  yardstick::roc_auc(score, truth = is_differential) |> 
+  pull(.estimate) |> 
+  round(4)
+
+raw_roc_curve |> 
+  yardstick::roc_curve(
+    score, 
+    truth = is_differential
+  ) |> 
+  autoplot() + 
+  labs(subtitle = "Using raw values", caption = paste0("ROC AUC: ", raw_auc))
+
+
+null_roc_curve <- 
+  temp_2 |> 
+  left_join(truth, by = "node_name") |> 
+  mutate(
+    is_differential = fct_rev(as.factor(is_differential)),
+    score = 1 - p_value_null
+  )
+
+raw_auc <- 
+  null_roc_curve |> 
+  yardstick::roc_auc(score, truth = is_differential) |> 
+  pull(.estimate) |> 
+  round(4)
+
+null_roc_curve |> 
+  yardstick::roc_curve(
+    score, 
+    truth = is_differential
+  ) |> 
+  autoplot() + 
+  labs(subtitle = "Using p-values", caption = paste0("ROC AUC: ", raw_auc))
+```
+
+
+
+
+
+
+```{r, eval = FALSE}
+prediction_tibble |> 
+  filter(node_name %in% paste0("TF", 1:10)) |> 
+  mutate(node_name = factor(node_name, levels = paste0("TF", 1:10))) |> 
+  ggplot(aes(x = abs(degree_diff))) + 
+  geom_vline(
+    xintercept = mean(abs(prediction_tibble$degree_diff)), 
+    color = "red", 
+    linetype = "dashed"
+  ) + 
+  geom_histogram(bins = 50) + 
+  facet_wrap(facets = vars(node_name)) + 
+  theme_bw()
+
+diff_prediction_tibble |> 
+  filter(node_name %in% paste0("TF", 1:10)) |> 
+  mutate(node_name = factor(node_name, levels = paste0("TF", 1:10))) |> 
+  ggplot(aes(x = degree)) + 
+  geom_vline(
+    xintercept = mean(diff_prediction_tibble$degree), 
+    color = "red", 
+    linetype = "dashed"
+  ) + 
+  geom_histogram(bins = 50) + 
+  facet_wrap(facets = vars(node_name)) + 
+  theme_bw()
+
+```
+
+
+```{r, eval = FALSE}
+# p-values for node centrality differences 
+augmented_prediction_1a <- 
+  prediction_tibble |>
+  select(-replicate, -.pred) |> 
+  mutate(degree_diff = abs(degree_diff)) |> 
+  group_by(node_name) |> 
+  nest(data = degree_diff) |> 
+  ungroup() |> 
+  transmute(
+    node_name,
+    null_distribution = map(.x = data, .f = tibble::deframe)
+  ) |> 
+  left_join(prediction_1a, by = "node_name") |> 
+  mutate(
+    p_value = 
+      map2_dbl(
+        .x = degree_diff,
+        .y = null_distribution, 
+        .f = ~ mean(.y > .x)
+      )
+  )
+
+augmented_prediction_1b <- 
+  prediction_tibble |>
+  select(-replicate, -.pred) |> 
+  mutate(degree_diff = abs(degree_diff)) |> 
+  group_by(node_name) |> 
+  nest(data = degree_diff) |> 
+  ungroup() |> 
+  transmute(
+    node_name,
+    null_distribution = map(.x = data, .f = tibble::deframe)
+  ) |> 
+  left_join(prediction_1b, by = "node_name") |> 
+  mutate(
+    p_value = 
+      map2_dbl(
+        .x = degree_diff,
+        .y = null_distribution, 
+        .f = ~ mean(.y < .x)
+      )
+  )
+
+augmented_prediction_1c <- 
+  prediction_tibble |>
+  select(-replicate, -.pred) |> 
+  mutate(degree_diff = abs(degree_diff)) |> 
+  group_by(node_name) |> 
+  nest(data = degree_diff) |> 
+  ungroup() |> 
+  transmute(
+    node_name,
+    null_distribution = map(.x = data, .f = tibble::deframe)
+  ) |> 
+  left_join(prediction_1c, by = "node_name") |> 
+  mutate(
+    p_value = 
+      map2_dbl(
+        .x = degree_diff,
+        .y = null_distribution, 
+        .f = ~ mean(.y > .x)
+      )
+  )
+```
+
+
+```{r, eval = FALSE}
+# edge_enrichment
+augmented_prediction_1a |> 
+  select(-null_distribution, .pred) |> 
+  arrange(factor(node_name, levels = paste0("TF", 1:100))) |> 
+  mutate(p_adjusted = p.adjust(p_value, method = "fdr")) |> 
+  filter(p_adjusted < 0.05)
+
+augmented_prediction_1a |> 
+  assess_differential_prediction(truth = truth) |> 
+  pluck("roc_plot") + 
+  labs(subtitle = "ROC Curve (raw degree difference)")
+
+augmented_prediction_1a |> 
+  mutate(.pred = 1 - p_value) |> 
+  arrange(-.pred) |> 
+  assess_differential_prediction(truth = truth) |> 
+  pluck("roc_plot") + 
+  labs(subtitle = "ROC Curve (degree difference p-value)")
+```
+
+```{r, eval = FALSE}
+# edge depletion
+augmented_prediction_1b |> 
+  select(-null_distribution, .pred) |> 
+  #arrange(factor(node_name, levels = paste0("TF", 1:100))) |> 
+  mutate(p_adjusted = p.adjust(p_value, method = "fdr")) |> 
+  filter(p_adjusted < 0.05)
+
+augmented_prediction_1b |> 
+  assess_differential_prediction(truth = truth) |> 
+  pluck("roc_plot") + 
+  labs(subtitle = "ROC Curve (raw degree difference)")
+
+augmented_prediction_1b |> 
+  mutate(.pred = 1 - p_value) |> 
+  arrange(-.pred) |> 
+  assess_differential_prediction(truth = truth) |> 
+  pluck("roc_plot") + 
+  labs(subtitle = "ROC Curve (degree difference p-value)")
+```
+
+```{r, eval = FALSE}
+# edge permutation
+augmented_prediction_1c |> 
+  select(-null_distribution, .pred) |> 
+  arrange(factor(node_name, levels = paste0("TF", 1:100))) |> 
+  mutate(p_adjusted = p.adjust(p_value, method = "fdr")) |> 
+  filter(p_adjusted < 0.05)
+
+augmented_prediction_1c |> 
+  assess_differential_prediction(truth = truth) |> 
+  pluck("roc_plot") + 
+  labs(subtitle = "ROC Curve (raw degree difference)")
+
+augmented_prediction_1c |> 
+  mutate(.pred = 1 - p_value) |> 
+  arrange(-.pred) |> 
+  assess_differential_prediction(truth = truth) |> 
+  pluck("roc_plot") + 
+  labs(subtitle = "ROC Curve (degree difference p-value)")
+```
+
+
+
+```{r, eval = FALSE}
+# p-values for edge subtraction 
+# p-values for node centrality differences 
+augmented_prediction_2a <- 
+  diff_prediction_tibble |>
+  select(node_name, degree) |> 
+  group_by(node_name) |> 
+  nest(data = degree) |> 
+  ungroup() |> 
+  transmute(
+    node_name,
+    null_distribution = map(.x = data, .f = tibble::deframe)
+  ) |> 
+  left_join(prediction_2a, by = "node_name") |> 
+  mutate(
+    p_value = 
+      map2_dbl(
+        .x = degree,
+        .y = null_distribution, 
+        .f = ~ mean(.y > .x)
+      )
+  )
+
+augmented_prediction_2b <- 
+  diff_prediction_tibble |>
+  select(node_name, degree) |> 
+  group_by(node_name) |> 
+  nest(data = degree) |> 
+  ungroup() |> 
+  transmute(
+    node_name,
+    null_distribution = map(.x = data, .f = tibble::deframe)
+  ) |> 
+  left_join(prediction_2b, by = "node_name") |> 
+  mutate(
+    p_value = 
+      map2_dbl(
+        .x = degree,
+        .y = null_distribution, 
+        .f = ~ mean(.y > .x)
+      )
+  )
+
+augmented_prediction_2c <- 
+  diff_prediction_tibble |>
+  select(node_name, degree) |> 
+  group_by(node_name) |> 
+  nest(data = degree) |> 
+  ungroup() |> 
+  transmute(
+    node_name,
+    null_distribution = map(.x = data, .f = tibble::deframe)
+  ) |> 
+  left_join(prediction_2c, by = "node_name") |> 
+  mutate(
+    p_value = 
+      map2_dbl(
+        .x = degree,
+        .y = null_distribution, 
+        .f = ~ mean(.y > .x)
+      )
+  )
+
+
+```
+
+
+```{r, eval = FALSE}
+# edge enrichment
+augmented_prediction_2a |> 
+  select(node_name, degree, .pred, p_value) |> 
+  arrange(factor(node_name, levels = paste0("TF", 1:100))) |> 
+  mutate(p_adjusted = p.adjust(p_value, method = "fdr")) |> 
+  filter(p_value < 0.05)
+
+augmented_prediction_2a |> 
+  select(node_name, degree, .pred, p_value) |> 
+  slice_max(order_by = .pred, n = 30) |> 
+  arrange(factor(node_name, levels = paste0("TF", 1:100))) 
+
+augmented_prediction_2a |> 
+  assess_differential_prediction(truth = truth) |> 
+  pluck("roc_plot") + 
+  labs(subtitle = "ROC Curve (raw edge-subtracted network degree)")
+
+augmented_prediction_2a |> 
+  mutate(.pred = 1 - p_value) |> 
+  arrange(-.pred) |> 
+  assess_differential_prediction(truth = truth) |> 
+  pluck("roc_plot") + 
+  labs(subtitle = "ROC Curve (edge-subtracted network degree p-value)")
+```
+
+```{r, eval = FALSE}
+# edge depletion
+augmented_prediction_2b |> 
+  select(node_name, degree, .pred, p_value) |> 
+  arrange(factor(node_name, levels = paste0("TF", 1:100))) |> 
+  mutate(p_adjusted = p.adjust(p_value, method = "fdr")) |> 
+  filter(p_value < 0.05)
+
+augmented_prediction_2b |> 
+  select(node_name, degree, .pred, p_value) |> 
+  slice_max(order_by = .pred, n = 30) |> 
+  arrange(factor(node_name, levels = paste0("TF", 1:100))) 
+
+augmented_prediction_2b |> 
+  assess_differential_prediction(truth = truth) |> 
+  pluck("roc_plot") + 
+  labs(subtitle = "ROC Curve (raw edge-subtracted network degree)")
+
+augmented_prediction_2b |> 
+  mutate(.pred = 1 - p_value) |> 
+  arrange(-.pred) |> 
+  assess_differential_prediction(truth = truth) |> 
+  pluck("roc_plot") + 
+  labs(subtitle = "ROC Curve (edge-subtracted network degree p-value)")
+```
+
+
+```{r, eval = FALSE}
+# edge permutation
+augmented_prediction_2c |> 
+  select(node_name, degree, .pred, p_value) |> 
+  arrange(factor(node_name, levels = paste0("TF", 1:100))) |> 
+  mutate(p_adjusted = p.adjust(p_value, method = "fdr")) |> 
+  filter(p_value < 0.05)
+
+augmented_prediction_2c |> 
+  select(node_name, degree, .pred, p_value) |> 
+  slice_max(order_by = .pred, n = 30) |> 
+  arrange(factor(node_name, levels = paste0("TF", 1:100))) 
+
+augmented_prediction_2c |> 
+  assess_differential_prediction(truth = truth) |> 
+  pluck("roc_plot") + 
+  labs(subtitle = "ROC Curve (raw edge-subtracted network degree)")
+
+augmented_prediction_2c |> 
+  mutate(.pred = 1 - p_value) |> 
+  arrange(-.pred) |> 
+  assess_differential_prediction(truth = truth) |> 
+  pluck("roc_plot") + 
+  labs(subtitle = "ROC Curve (edge-subtracted network degree p-value)")
+```
+
+
+# Luli's simulations 
+
+## read in u and v matrices fit using her model
+
+This matrices are fit for the first and third reprogramseq clusters (C1 and C3)
+
+
+```{r}
+# cluster 1
+# u_fitted_1 <-
+#   "/gstore/project/lineage/luli/for_timothy/reprogramseq_u_fitted_7-25-22.rds" |>
+#   read_rds() |>
+#   as.matrix() |>
+#   tidy_u()
+# 
+# dim(u_fitted_1)
+
+# v_fitted_1 <-
+#   "/gstore/project/lineage/luli/for_timothy/reprogramseq_v_fitted_7-25-22.rds" |>
+#   read_rds() |>
+#   as.matrix() |>
+#   tidy_v()
+```
+
+
+
+```{r}
+# cluster 3
+# u_fitted_3 <-
+#   "/gstore/project/lineage/luli/for_timothy/reprogramseq_u_C3_fitted_7-26-22.rds" |>
+#   read_rds() |>
+#   as.matrix() |>
+#   tidy_u()
+# 
+# dim(u_fitted_3)
+
+# v_fitted_3 <-
+#   "/gstore/project/lineage/luli/for_timothy/reprogramseq_v_C3_fitted_7-26-22.rds" |>
+#   read_rds() |>
+#   as.matrix() |>
+#   tidy_v()
+```
+
+
+```{r}
+# u_fitted_1 |>
+#   mutate(non_zero = abs(weight) > 0) |>
+#   count(non_zero) |>
+#   mutate(cluster = "C1") |>
+#   bind_rows(
+#     u_fitted_3 |>
+#       mutate(non_zero = abs(weight) > 0) |>
+#       count(non_zero) |>
+#       mutate(cluster = "C3")
+#   )
+
+# v_fitted_3 |>
+#   mutate(non_zero = abs(weight) > 0) |>
+#   count(non_zero)
+```
+
+```{r}
+# sampled_u_1 <-
+#   u_fitted_1 |>
+#   group_by(tf) |>
+#   slice_sample(prop = 0.01) |>
+#   ungroup()
+# 
+# sampled_u_3 <-
+#   u_fitted_3 |>
+#   filter(edge_id %in% sampled_u_1$edge_id)
+# 
+# sampled_u_1
+# 
+# sampled_u_3
+```
+
+
+```{r}
+# temp <-
+#   sampled_u_1 |>
+#   compute_null_distribution(num_replicates = 100, difference_method = "centrality") |>
+#   arrange(node_name)
+# 
+# temp_2 <-
+#   sampled_u_1 |>
+#   compute_null_distribution(num_replicates = 100, difference_method = "edge") |>
+#   arrange(node_name)
+```
+
+
+```{r}
+# temp 
+# 
+# temp_2
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

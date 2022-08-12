@@ -1,0 +1,2054 @@
+---
+title: "multiome initial fit eda"
+author: "timothy keyes"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=TRUE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+```
+
+# Parameters
+
+```{r}
+library(tidyverse)
+library(tidygraph)
+library(patchwork)
+
+source(here::here("R", "utils.R"))
+source(here::here("R", "differential_network_utils.R"))
+
+input_path <- "/gstore/project/lineage/luli/for_timothy"
+
+cluster_paths <- 
+  dir(input_path, full.names = TRUE) |> 
+  stringr::str_subset(pattern = "weights_")
+
+tf_names_path <- file.path(input_path, "tf_peak_connections.rds")
+tg_names_path <- file.path(input_path, "peak_gene_connections.rds")
+
+# tf names 
+tf_names <- 
+  tf_names_path |> 
+  read_rds() |> 
+  rownames()
+
+# re names 
+re_names <- 
+  tf_names_path |> 
+  read_rds() |> 
+  colnames()
+
+tg_names <- 
+  tg_names_path |> 
+  read_rds() |> 
+  colnames()
+
+special_tfs <- c("GATA6", "FOXA1", "NKX2-1")
+```
+
+
+# Introduction 
+
+In this notebook, we _____.
+
+Explicitly, the goals of these analyses are to _____. 
+
+
+# Read in data
+
+```{r}
+# loads in u1 and v1
+load(cluster_paths[[1]])
+
+print(paste0("Dimensions for u1: [", dim(u1)[[1]], " x ", dim(u1)[[2]], "]"))
+print(paste0("Dimensions for v1: [", dim(v1)[[1]], " x ", dim(v1)[[2]], "]"))
+
+# loads in u2 and v2 
+load(cluster_paths[[2]])
+
+print(paste0("Dimensions for u2: [", dim(u2)[[1]], " x ", dim(u2)[[2]], "]"))
+print(paste0("Dimensions for v2: [", dim(v2)[[1]], " x ", dim(v2)[[2]], "]"))
+
+# load in u3 and v3
+load(cluster_paths[[3]])
+
+print(paste0("Dimensions for u3: [", dim(u3)[[1]], " x ", dim(u3)[[2]], "]"))
+print(paste0("Dimensions for v3: [", dim(v3)[[1]], " x ", dim(v3)[[2]], "]"))
+
+# load in u4 and v4
+load(cluster_paths[[4]])
+
+print(paste0("Dimensions for u4: [", dim(u4)[[1]], " x ", dim(u4)[[2]], "]"))
+print(paste0("Dimensions for v4: [", dim(v4)[[1]], " x ", dim(v4)[[2]], "]"))
+
+# load in u5 and v5
+load(cluster_paths[[5]])
+
+print(paste0("Dimensions for u5: [", dim(u5)[[1]], " x ", dim(u5)[[2]], "]"))
+print(paste0("Dimensions for v5: [", dim(v5)[[1]], " x ", dim(v5)[[2]], "]"))
+
+# load in u6 and v6
+load(cluster_paths[[6]])
+
+print(paste0("Dimensions for u6: [", dim(u6)[[1]], " x ", dim(u6)[[2]], "]"))
+print(paste0("Dimensions for v6: [", dim(v6)[[1]], " x ", dim(v6)[[2]], "]"))
+```
+
+Put all u's and v's into a single data structure that is easy to manipulate
+
+```{r}
+clusters <- 
+  tibble::tibble(
+    cluster = paste0("cluster_", 1:6),
+    reprogrammed_tf = 
+      c(
+        "GATA6", "unknown", "NKX2-1", 
+        "FOXA1", "unreprogrammed", "unreprogrammed"
+      ), 
+    u = list(u1, u2, u3, u4, u5, u6), 
+    v = list(v1, v2, v3, v4, v5, v6)
+  ) |> 
+  # convert adjacent matrices into edge lists 
+  mutate(
+    u_edge_list = 
+      map(.x = u, .f = clean_u, tf_names = tf_names, re_names = re_names), 
+    v_edge_list = 
+      map(.x = v, .f = clean_v, re_names = re_names, tg_names = tg_names)
+  )
+```
+
+
+
+# Build graphs
+
+```{r}
+# TF -> RE edge list of the 5th cluster
+u_edge_list_5 <- 
+  clusters |> 
+  filter(cluster == "cluster_5") |> 
+  pull(u_edge_list) |> 
+  pluck(1)
+
+# RE -> TG edge list of the 5th cluster
+v_edge_list_5 <-
+  clusters |> 
+  filter(cluster == "cluster_5") |> 
+  pull(v_edge_list) |> 
+  pluck(1)
+
+# difference graphs with cluster 5 as the baseline 
+cluster_5_diff_graphs <- 
+  map2(
+    .x = clusters$u_edge_list,
+    .y = clusters$v_edge_list, 
+    .f = ~ 
+      build_difference_graph(
+        u_1 = u_edge_list_5, 
+        u_2 = .x, 
+        v_1 = v_edge_list_5, 
+        v_2 = .y
+      )
+  )
+
+# TF -> RE edge list of the 6th cluster
+u_edge_list_6 <- 
+  clusters |> 
+  filter(cluster == "cluster_6") |> 
+  pull(u_edge_list) |> 
+  pluck(1)
+
+# RE -> TG edge list of the 6th cluster
+v_edge_list_6 <-
+  clusters |> 
+  filter(cluster == "cluster_6") |> 
+  pull(v_edge_list) |> 
+  pluck(1)
+
+# difference graphs with cluster 6 as the baseline 
+cluster_6_diff_graphs <- 
+  map2(
+    .x = clusters$u_edge_list,
+    .y = clusters$v_edge_list, 
+    .f = ~ 
+      build_difference_graph(
+        u_1 = u_edge_list_6, 
+        u_2 = .x, 
+        v_1 = v_edge_list_6, 
+        v_2 = .y
+      )
+  )
+
+# individual graphs for each cluster 
+individual_graphs <- 
+  map2(
+    .x = clusters$u_edge_list, 
+    .y = clusters$v_edge_list, 
+    .f = ~ build_graph(u = .x, v = .y)
+  )
+```
+
+
+
+
+```{r}
+# add difference graphs and individual graphs for each cluster to the clusters tibble
+clusters <- 
+  clusters |> 
+  mutate(
+    individual_graphs = individual_graphs, 
+    cluster_5_diff_graphs = cluster_5_diff_graphs, 
+    cluster_6_diff_graphs = cluster_6_diff_graphs
+  )
+```
+
+
+
+# Calculate Centralities 
+
+```{r}
+#centralities for each TF in the edge-subtracted graphs
+diff_centralities_5 <- 
+  cluster_5_diff_graphs |> 
+  map(.f = calculate_tf_centralities)
+
+diff_centralities_6 <- 
+  cluster_6_diff_graphs |> 
+  map(.f = calculate_tf_centralities)
+
+# centralities in each of the cluster-specific graphs
+centralities <- 
+  individual_graphs |> 
+  map(.f = calculate_tf_centralities)
+
+weighted_centralities <- 
+  individual_graphs |> 
+  map(.f = calculate_tf_centralities, weights = abs(weight))
+
+# add centralities 
+clusters$centralities_5 <- diff_centralities_5
+clusters$centralities_6 <- diff_centralities_6
+clusters$centralities <- centralities
+clusters$weighted_centralities <- weighted_centralities
+```
+
+
+```{r}
+# combine all degree information for all TFs across different graphs
+
+# placeholder for difference graphs between clusters 5/6 and themselves
+empty_centrality_tibble <- 
+  diff_centralities_5[[6]] |> 
+  mutate(degree = 0)
+
+centrality_tibble <- 
+  # combine edge-subtracted centralities foe each cluster 
+  # compared to clusters 5 and 6
+  tibble::tibble(
+    cluster = paste0("cluster_", 1:length(diff_centralities_5)), 
+    diff_centralities_5 = diff_centralities_5, 
+    diff_centralities_6 = diff_centralities_6
+  ) |> 
+  mutate(
+    diff_centralities_5 = 
+      if_else(
+        map_lgl(.x = diff_centralities_5, .f = ~ nrow(.x) == 0), 
+        list(empty_centrality_tibble), 
+        diff_centralities_5
+      ) |> 
+      map(.f = ~transmute(.x, node_name, degree_5 = degree)),
+    diff_centralities_6 = 
+      if_else(
+        map_lgl(.x = diff_centralities_6, .f = ~ nrow(.x) == 0), 
+        list(empty_centrality_tibble), 
+        diff_centralities_6
+      ) |> 
+      map(.f = ~transmute(.x, node_name, degree_6 = degree))
+    ) |> 
+  # add the centralities of each cluster in their base network
+  transmute(
+    cluster, 
+    centralities = 
+      map2(
+        .x = diff_centralities_5, 
+        .y = diff_centralities_6, 
+        .f = ~ left_join(.x, .y, by = "node_name")
+      ) |> 
+      map2(.y = centralities, .f = ~ left_join(.x, .y, by = "node_name"))
+  )
+
+# print 
+centrality_tibble |> 
+  unnest()
+```
+
+
+# The problem(s) with using raw degrees to detect differential TFs
+
+If we look at GATA6's differential activity score betweeen clusters 1 (reprogrammed with GATA6) and 5/6 (non-reprogrammed), we can see that GATA6's differential activity score is relatively low compared to the full distribution. 
+
+```{r}
+# difference between graph 5 and graph 1
+gata6_degree <- 
+  diff_centralities_5[[1]] |> 
+  filter(node_name == "GATA6") |> 
+  pull(degree)
+
+diff_centralities_5[[1]] |> 
+  mutate(
+    node_name = fct_reorder(node_name, degree), 
+    is_gata6 = if_else(node_name == "GATA6", "GATA6", "Not GATA6")
+  ) |>
+  ggplot(aes(x = degree)) + 
+  geom_histogram(binwidth = 100) + 
+  geom_vline(xintercept = gata6_degree) + 
+  theme_bw() + 
+  labs(
+    subtitle = "Cluster 1 (GATA-6) vs. Cluster 5 (unreprogrammed)", 
+    x = "Degree in the edge-subtracted network", 
+    y = "Number of TFs", 
+    caption = "Black vertical line indicates the location of GATA-6"
+  )
+
+gata6_degree <- 
+  diff_centralities_6[[1]] |> 
+  filter(node_name == "GATA6") |> 
+  pull(degree)
+
+diff_centralities_6[[1]] |> 
+  mutate(
+    node_name = fct_reorder(node_name, degree), 
+    is_gata6 = if_else(node_name == "GATA6", "GATA6", "Not GATA6")
+  ) |>
+  ggplot(aes(x = degree)) + 
+  geom_histogram(binwidth = 100) + 
+  geom_vline(xintercept = gata6_degree) + 
+  theme_bw() + 
+  labs(
+    subtitle = "Cluster 1 (GATA-6) vs. Cluster 6 (unreprogrammed)", 
+    x = "Degree in the edge-subtracted network", 
+    y = "Number of TFs", 
+    caption = "Black vertical line indicates the location of GATA-6"
+  )
+```
+
+
+```{r, include = FALSE}
+gata6_degree_null <- 
+  make_predictions(centralities_diff = diff_centralities_5[[6]]) |> 
+  filter(node_name == "GATA6") |> 
+  pull(degree)
+
+make_predictions(centralities_diff = diff_centralities_5[[6]]) |> 
+  mutate(
+    node_name = fct_reorder(node_name, degree), 
+    is_gata6 = if_else(node_name == "GATA6", "GATA6", "Not GATA6")
+  ) |>
+  ggplot(aes(x = degree)) + 
+  geom_histogram(binwidth = 100) + 
+  geom_vline(xintercept = gata6_degree_null) + 
+  theme_bw() + 
+  labs(
+    subtitle = "Cluster 5 (unreprogrammed) vs. Cluster 6 (unreprogrammed)", 
+    x = "Degree in the edge-subtracted network", 
+    y = "Number of TFs", 
+    caption = "Black vertical line indicates the location of GATA-6"
+  )
+```
+
+Does this mean that GATA6 activity is not very different between clusters 1 and 5/6? Maybe, but one thing we might notice from the histograms above is the wide range of degrees in the edge-subtracted network among TFs. So we might be worried about two issues: 
+
+* Certain TFs are associated with many more REs and TGs than other TFs, and their degree in the edge-subtracted network may simply reflect this. 
+* There may be many small-weight differences between edges in the graph for cluster 1 and cluster 5, and these small-weight differences - unless ignored - could spuriously inflate some TFs number of differential edges. 
+
+We explore these two issues in the sections below.
+
+## **Problem 1**: TFs are associated with very different numbers of REs and TGs
+
+### Illustration of the problem
+
+To look into the first possibility, we can plot a scatterplot of a TF's average degree across both clusters and its degree in the edge-subtracted network. 
+
+```{r}
+centralities_1 <- 
+  centralities[[1]] |> 
+  rename(degree_1 = degree)
+centralities_5 <- centralities[[5]] |> 
+  rename(degree_5 = degree)
+centralities_6 <- 
+  centralities[[6]] |> 
+  rename(degree_6 = degree)
+
+centralities_combined <- 
+  centralities_1 |> 
+  left_join(centralities_5, by = c("node_name", "node_type")) |> 
+  left_join(centralities_6, by = c("node_name", "node_type")) |> 
+  mutate(degree_mean = (degree_1 + degree_5 + degree_6) / 3)
+
+plot_tibble <- 
+  centralities_combined |> 
+  left_join(
+    diff_centralities_5[[1]], 
+    by = c("node_name", "node_type")
+  )
+
+correlation <- 
+  cor(x = plot_tibble$degree, y = plot_tibble$degree_mean) |> 
+  round(4)
+
+plot_tibble |> 
+  ggplot(aes(x = degree_mean, y = degree)) + 
+  geom_point() + 
+  theme_bw() + 
+  labs(
+    y = "Degree in edge-subtracted network", 
+    x = "Average degree in the original networks",
+    caption = paste0("Correlation: ", correlation)
+  )
+```
+
+From this plot, we can see that there is a huge correlation between a TF's degree in the edge-subtracted network and its degree in the original networks (averaged). So, we can consider normalizing the score of how differential each TF is by some metric of its degree in both networks being compared (i.e. the average of the two networks). 
+
+We can also plot what the differential score result would be using the "centrality subtraction" method (as opposed to the "edge subtraction" method above), and we can see that a version of the same problem is present (though to a lesser extent). 
+
+```{r}
+# brief investigation into the centrality subtraction case (as opposed to edge 
+# subtraction)
+plot_tibble <- 
+  make_predictions(
+    centralities_1 = rename(centralities_5, degree = degree_5), 
+    centralities_2 = rename(centralities_1, degree = degree_1)
+  ) |> 
+  left_join(centralities_combined, by = c("node_name"))
+  
+correlation <- 
+  cor(x = plot_tibble$degree_mean, y = plot_tibble$degree_diff) |> 
+  round(4)
+
+plot_tibble |> 
+  ggplot(aes(x = degree_mean, y = degree_diff)) + 
+  geom_point() + 
+  theme_bw() + 
+  labs(caption = paste0("Correlation: ", correlation))
+```
+
+
+So, we must find some way to normalize the differential "score" for each TF based on its degree in the baseline network(s). 
+
+### Potential solution: Normalize the degree of each TF in the edge-subtracted network by its degree in the separate networks. 
+
+```{r}
+# test with clusters 1 and 5 again
+# find mean centralities for each TF in both clusters 1 and 5
+baseline_centralities_15 <- 
+  centrality_tibble |> 
+  unnest(cols = centralities) |> 
+  filter(cluster %in% paste0("cluster_", c(1, 5))) |> 
+  group_by(node_name) |> 
+  summarize(mean_degree = mean(degree)) |>  
+  arrange(-mean_degree) |> 
+  ungroup()
+
+baseline_centralities_15
+
+# normalize the edge-subtracted centrality for cluster 1 and 5 by the mean values
+# TO DO: Make sure that this matches with new normalize_predictions function
+normalized_predictions_15_old <- 
+  centrality_tibble |> 
+  unnest(cols = centralities) |> 
+  filter(cluster == "cluster_1") |> 
+  left_join(baseline_centralities_15, by = "node_name") |> 
+  transmute(
+    node_name, 
+    degree, 
+    degree_5, 
+    mean_degree, 
+    normalized_degree = degree_5 / mean_degree
+  ) |> 
+  arrange(-degree)
+```
+
+
+
+```{r}
+normalized_centralities_15 <- 
+  clusters |> 
+  filter(cluster == "cluster_1") |> 
+  pull(centralities_5) |> 
+  pluck(1) |> 
+  normalize_predictions(
+    cluster_1_centralities = clusters$centralities[[1]], 
+    cluster_2_centralities = clusters$centralities[[5]]
+  ) |> 
+  arrange(-normalized_degree) |> 
+  rename(degree = normalized_degree)
+
+normalized_centralities_15 |> 
+  mutate(rank = rank(-degree)) |> 
+  filter(node_name == "GATA6")
+
+# plot correlation
+plot_tibble <- 
+  normalized_centralities_15 |> 
+  left_join(centralities_combined, by = "node_name")
+
+correlation <- 
+  cor(x = plot_tibble$degree, y = plot_tibble$degree_mean) |> 
+  round(4)
+
+plot_tibble |> 
+  ggplot(aes(x = degree, y = degree_mean)) + 
+  geom_point(alpha = 0.25) + 
+  theme_bw() + 
+  labs(
+    x = "Normalized degree in edge-subtracted network", 
+    y = "Average degree in clusters 1 and 5", 
+    caption = paste0("Correlation: ", correlation)
+  )
+```
+
+
+
+
+
+
+
+```{r}
+
+normalized_centralities_16 <- 
+  clusters |> 
+  filter(cluster == "cluster_1") |> 
+  pull(centralities_6) |> 
+  pluck(1) |> 
+  normalize_predictions(
+    cluster_1_centralities = clusters$centralities[[1]], 
+    cluster_2_centralities = clusters$centralities[[5]]
+  ) |> 
+  arrange(-normalized_degree) |> 
+  rename(degree = normalized_degree)
+
+normalized_centralities_15 |> 
+  mutate(rank = rank(-degree)) |> 
+  filter(node_name == "GATA6")
+
+# plot correlation
+plot_tibble <- 
+  normalized_centralities_16 |> 
+  left_join(centralities_combined, by = "node_name")
+
+correlation <- 
+  cor(x = plot_tibble$degree, y = plot_tibble$degree_mean) |> 
+  round(4)
+
+plot_tibble |> 
+  ggplot(aes(x = degree, y = degree_mean)) + 
+  geom_point(alpha = 0.25) + 
+  theme_bw() + 
+  labs(
+    x = "Normalized degree in edge-subtracted network", 
+    y = "Average degree in clusters 1 and 6", 
+    caption = paste0("Correlation: ", correlation)
+  )
+```
+
+
+## **Problem 2**: Not all differential edges are created equal 
+
+## Illustration of the problem 
+
+```{r}
+# find the deciles of the weights in the 
+# difference graph between cluster 1 and cluster 5
+quantiles_51 <- 
+  clusters$cluster_5_diff_graphs[[1]] |> 
+  activate("edges") |> 
+  as_tibble() |> 
+  pull(weight) |> 
+  abs() |> 
+  quantile(probs = seq(0, 1, 0.1)) |> 
+  enframe() |> 
+  rename(quantile = name)
+
+print(quantiles_51)
+
+# plot the distribution of weights 
+clusters$cluster_5_diff_graphs[[1]] |> 
+  activate("edges") |> 
+  as_tibble() |> 
+  arrange(abs(weight)) |> 
+  mutate(
+    weight_sign = sign(weight), 
+    log_weight = log10(abs(weight)), 
+    #log_weight = weight_sign * log_weight
+  ) |>
+  ggplot(aes(x = log_weight)) + 
+  geom_histogram(bins = 35) + 
+  geom_vline(xintercept = log10(1e-6), linetype = "dashed") +  
+  theme_bw() + 
+  labs(
+    subtitle = "Cluster 5 vs. Cluster 1", 
+    x = "abs(weight); log10 scale", 
+    caption = "Dashed line indicates Luli's threshold"
+  )
+```
+
+
+```{r}
+# find the deciles of the weights in the 
+# difference graph between cluster 5 and cluster 6
+quantiles_56 <-
+  cluster_5_diff_graphs[[6]] |> 
+  activate("edges") |> 
+  as_tibble() |> 
+  pull(weight) |> 
+  abs() |> 
+  quantile(probs = seq(0, 1, 0.1)) |> 
+  enframe() |> 
+  rename(quantile = name)
+
+print(quantiles_56)
+
+# plot weight distributions
+cluster_5_diff_graphs[[6]] |> 
+  activate("edges") |> 
+  as_tibble() |> 
+  arrange(-weight) |> 
+  mutate(
+    weight_sign = sign(weight), 
+    log_weight = log10(abs(weight)), 
+  ) |>
+  ggplot(aes(x = log_weight)) + 
+  geom_histogram(bins = 35) + 
+  geom_vline(xintercept = -6, linetype = "dashed") + 
+  theme_bw() + 
+  labs(
+    subtitle = "Cluster 5 vs. Cluster 6", x = "abs(weight); log10 scale", 
+    caption = "Vertical line indicates Luli's threshold"
+  )
+```
+
+### Potential solution 1: Threshold the differential edges by size
+
+One way to address this issue would be to threshold. 
+
+So, where do we draw the threshold? Maybe the median? Another quantile?
+
+
+#### Try filtering on Cluster 1 vs. Cluster 5
+
+```{r}
+unfiltered_graph_51 <- 
+  clusters$cluster_5_diff_graphs[[1]]
+
+filtered_graph_51 <- 
+  clusters$cluster_5_diff_graphs[[1]] |> 
+  activate("edges") |> 
+  #filter(abs(weight) > quantile(abs(weight), probs = 0.15)) |> 
+  filter(abs(weight) > 1e-3) |> 
+  activate("nodes")
+
+filtered_graph_51
+```
+
+
+```{r}
+# calculate the ranking of the 3 special TFs in the normalized, filtered 
+# edge-subtracted graph
+special_tfs_51_filtered <- 
+  filtered_graph_51 |> 
+  calculate_tf_centralities() |> 
+  normalize_centralities(
+    cluster_1_centralities = clusters$centralities[[5]], 
+    cluster_2_centralities = clusters$centralities[[1]]
+  ) |> 
+  mutate(rank = rank(-normalized_degree)) |> 
+  filter(node_name %in% special_tfs)
+
+special_tfs_51_unfiltered <- 
+  unfiltered_graph_51 |> 
+  calculate_tf_centralities() |> 
+  normalize_centralities(
+    cluster_1_centralities = clusters$centralities[[5]], 
+    cluster_2_centralities = clusters$centralities[[1]]
+  ) |> 
+  mutate(rank = rank(-normalized_degree)) |> 
+  filter(node_name %in% special_tfs)
+
+special_tfs_51_filtered
+special_tfs_51_unfiltered
+```
+
+```{r}
+# plot histogram of all TFs 
+
+## filtered 
+filtered_graph_51 |> 
+  calculate_tf_centralities() |> 
+  normalize_centralities(
+    cluster_1_centralities = clusters$centralities[[5]], 
+    cluster_2_centralities = clusters$centralities[[1]]
+  ) |> 
+  mutate(rank = rank(-normalized_degree)) |> 
+  ggplot(aes(x = normalized_degree)) + 
+  geom_histogram(bins = 30, color = "black", size = 0.5) + 
+  geom_vline(
+    aes(xintercept = normalized_degree, color = node_name), 
+    data = special_tfs_51_filtered
+  ) + 
+  theme_bw() + 
+  labs(
+    subtitle = "Filtered graph; Cluster 1 (GATA-6) vs Cluster 5", 
+    color = NULL
+  )
+
+## unfiltered
+unfiltered_graph_51 |> 
+  calculate_tf_centralities() |> 
+  normalize_centralities(
+    cluster_1_centralities = clusters$centralities[[5]], 
+    cluster_2_centralities = clusters$centralities[[1]]
+  ) |> 
+  mutate(rank = rank(-normalized_degree)) |> 
+  ggplot(aes(x = normalized_degree)) + 
+  geom_histogram(bins = 30, color = "black", size = 0.5) + 
+  geom_vline(
+    aes(xintercept = normalized_degree, color = node_name), 
+    data = special_tfs_51_unfiltered
+  ) + 
+  theme_bw() + 
+  labs(
+    subtitle = "Unfiltered graph; Cluster 1 (GATA-6) vs Cluster 5", 
+    color = NULL
+  )
+```
+
+
+```{r}
+# plot 50 most differential TFs
+# plot normalized centralities of most differential TFs 
+
+unfiltered_graph_51 |> 
+  calculate_tf_centralities() |> 
+  normalize_centralities(
+    cluster_1_centralities = clusters$centralities[[5]], 
+    cluster_2_centralities = clusters$centralities[[1]]
+  ) |> 
+  slice_max(order_by = normalized_degree, n = 50) |>
+  mutate(
+    node_name = fct_reorder(node_name, normalized_degree),
+    special_tf = if_else(node_name %in% special_tfs, "Special TF", "Not special TF")
+  ) |> 
+  ggplot(aes(x = normalized_degree, y = node_name, fill = special_tf)) + 
+  geom_point(shape = 21) + 
+  ggthemes::scale_fill_tableau() + 
+  theme_bw() + 
+  theme(axis.text.y = element_text(size = 5)) + 
+  labs(
+    subtitle = "Top 50 differential TFs in Cluster 1 (vs. Cluster 5); unfiltered",
+    x = "Normalized degree", 
+    y = NULL, 
+    fill = NULL
+  )
+
+
+filtered_graph_51 |> 
+  calculate_tf_centralities() |>
+  normalize_centralities(
+    cluster_1_centralities = clusters$centralities[[5]], 
+    cluster_2_centralities = clusters$centralities[[1]]
+  ) |> 
+  slice_max(order_by = normalized_degree, n = 50) |>
+  mutate(
+    node_name = fct_reorder(node_name, normalized_degree),
+    special_tf = if_else(node_name %in% special_tfs, "Special TF", "Not special TF")
+  ) |> 
+  ggplot(aes(x = normalized_degree, y = node_name, fill = special_tf)) + 
+  geom_point(shape = 21) + 
+  ggthemes::scale_fill_tableau() + 
+  theme_bw() + 
+  theme(axis.text.y = element_text(size = 5)) + 
+  labs(
+    subtitle = "Top 50 differential TFs in Cluster 1 (vs. Cluster 5); filtered",
+    x = "Normalized degree", 
+    y = NULL, 
+    fill = NULL
+  )
+
+```
+
+This strategy seems to introduce another issue, which is that TFs with a really small number of edges in the filtered graph can have unstable normalized degree scores. Note that several of the "most differential" TFs above have very low degrees in the original networks: 
+
+```{r}
+clusters$individual_graphs[[1]] |>  
+  calculate_tf_centralities() |>  
+  arrange(degree)
+```
+
+One way to deal with this is to only consider TFs with more than a certain number of edges (in the code below, above the 1st percentile of all TFs in the network): 
+
+```{r}
+filtered_graph_51 |> 
+  calculate_tf_centralities() |> 
+  filter(degree >= quantile(degree, probs = 0.01)) |>
+  normalize_centralities(
+    cluster_1_centralities = clusters$centralities[[5]], 
+    cluster_2_centralities = clusters$centralities[[1]]
+  ) |> 
+  slice_max(order_by = normalized_degree, n = 50) |>
+  mutate(
+    node_name = fct_reorder(node_name, normalized_degree),
+    special_tf = if_else(node_name %in% special_tfs, "Special TF", "Not special TF")
+  ) |> 
+  ggplot(aes(x = normalized_degree, y = node_name, fill = special_tf)) + 
+  geom_point(shape = 21) + 
+  ggthemes::scale_fill_tableau() + 
+  theme_bw() + 
+  theme(axis.text.y = element_text(size = 5)) + 
+  labs(
+    subtitle = "Top 50 differential TFs in Cluster 1 (vs. Cluster 5); filtered",
+    x = "Normalized degree", 
+    y = NULL, 
+    fill = NULL
+  )
+```
+
+
+#### Try filtering on Cluster 1 vs. Cluster 6
+
+```{r}
+unfiltered_graph_61 <- 
+  clusters$cluster_6_diff_graphs[[1]]
+
+filtered_graph_61 <- 
+  clusters$cluster_6_diff_graphs[[1]] |> 
+  activate("edges") |> 
+  #filter(abs(weight) > quantile(abs(weight), probs = 0.15)) |> 
+  filter(abs(weight) > 1e-3) |> 
+  activate("nodes")
+
+filtered_graph_61
+```
+
+
+```{r}
+# calculate the ranking of the 3 special TFs in the normalized, filtered 
+# edge-subtracted graph
+special_tfs_61_filtered <- 
+  filtered_graph_61 |> 
+  calculate_tf_centralities() |> 
+  normalize_centralities(
+    cluster_1_centralities = clusters$centralities[[5]], 
+    cluster_2_centralities = clusters$centralities[[1]]
+  ) |> 
+  mutate(rank = rank(-normalized_degree)) |> 
+  filter(node_name %in% special_tfs)
+
+special_tfs_61_unfiltered <- 
+  unfiltered_graph_61 |> 
+  calculate_tf_centralities() |> 
+  normalize_centralities(
+    cluster_1_centralities = clusters$centralities[[5]], 
+    cluster_2_centralities = clusters$centralities[[1]]
+  ) |> 
+  mutate(rank = rank(-normalized_degree)) |> 
+  filter(node_name %in% special_tfs)
+
+special_tfs_61_filtered
+special_tfs_61_unfiltered
+```
+
+```{r}
+# plot histogram of all TFs 
+
+## filtered 
+filtered_graph_61 |> 
+  calculate_tf_centralities() |> 
+  normalize_centralities(
+    cluster_1_centralities = clusters$centralities[[5]], 
+    cluster_2_centralities = clusters$centralities[[1]]
+  ) |> 
+  mutate(rank = rank(-normalized_degree)) |> 
+  ggplot(aes(x = normalized_degree)) + 
+  geom_histogram(bins = 30, color = "black", size = 0.5) + 
+  geom_vline(
+    aes(xintercept = normalized_degree, color = node_name), 
+    data = special_tfs_61_filtered
+  ) + 
+  theme_bw() + 
+  labs(
+    subtitle = "Filtered graph; Cluster 1 (GATA-6) vs Cluster 6", 
+    color = NULL
+  )
+
+## unfiltered
+unfiltered_graph_61 |> 
+  calculate_tf_centralities() |> 
+  normalize_centralities(
+    cluster_1_centralities = clusters$centralities[[5]], 
+    cluster_2_centralities = clusters$centralities[[1]]
+  ) |> 
+  mutate(rank = rank(-normalized_degree)) |> 
+  ggplot(aes(x = normalized_degree)) + 
+  geom_histogram(bins = 30, color = "black", size = 0.5) + 
+  geom_vline(
+    aes(xintercept = normalized_degree, color = node_name), 
+    data = special_tfs_61_unfiltered
+  ) + 
+  theme_bw() + 
+  labs(
+    subtitle = "Unfiltered graph; Cluster 1 (GATA-6) vs Cluster 6", 
+    color = NULL
+  )
+```
+
+
+```{r}
+# plot 50 most differential TFs
+# plot normalized centralities of most differential TFs 
+unfiltered_graph_61 |> 
+  calculate_tf_centralities() |> 
+  normalize_centralities(
+    cluster_1_centralities = clusters$centralities[[5]], 
+    cluster_2_centralities = clusters$centralities[[1]]
+  ) |> 
+  slice_max(order_by = normalized_degree, n = 50) |>
+  mutate(
+    node_name = fct_reorder(node_name, normalized_degree),
+    special_tf = if_else(node_name %in% special_tfs, "Special TF", "Not special TF")
+  ) |> 
+  ggplot(aes(x = normalized_degree, y = node_name, fill = special_tf)) + 
+  geom_point(shape = 21) + 
+  ggthemes::scale_fill_tableau() + 
+  theme_bw() + 
+  theme(axis.text.y = element_text(size = 5)) + 
+  labs(
+    subtitle = "Top 50 differential TFs in Cluster 1 (vs. Cluster 6); unfiltered",
+    x = "Normalized degree", 
+    y = NULL, 
+    fill = NULL
+  )
+
+
+filtered_graph_61 |> 
+  calculate_tf_centralities() |>
+  normalize_centralities(
+    cluster_1_centralities = clusters$centralities[[5]], 
+    cluster_2_centralities = clusters$centralities[[1]]
+  ) |> 
+  slice_max(order_by = normalized_degree, n = 50) |>
+  mutate(
+    node_name = fct_reorder(node_name, normalized_degree),
+    special_tf = if_else(node_name %in% special_tfs, "Special TF", "Not special TF")
+  ) |> 
+  ggplot(aes(x = normalized_degree, y = node_name, fill = special_tf)) + 
+  geom_point(shape = 21) + 
+  ggthemes::scale_fill_tableau() + 
+  theme_bw() + 
+  theme(axis.text.y = element_text(size = 5)) + 
+  labs(
+    subtitle = "Top 50 differential TFs in Cluster 1 (vs. Cluster 6); filtered",
+    x = "Normalized degree", 
+    y = NULL, 
+    fill = NULL
+  )
+
+```
+
+
+
+```{r}
+filtered_graph_61 |> 
+  calculate_tf_centralities() |> 
+  filter(degree >= quantile(degree, probs = 0.01)) |>
+  normalize_centralities(
+    cluster_1_centralities = clusters$centralities[[5]], 
+    cluster_2_centralities = clusters$centralities[[1]]
+  ) |> 
+  slice_max(order_by = normalized_degree, n = 50) |>
+  mutate(
+    node_name = fct_reorder(node_name, normalized_degree),
+    special_tf = if_else(node_name %in% special_tfs, "Special TF", "Not special TF")
+  ) |> 
+  ggplot(aes(x = normalized_degree, y = node_name, fill = special_tf)) + 
+  geom_point(shape = 21) + 
+  ggthemes::scale_fill_tableau() + 
+  theme_bw() + 
+  theme(axis.text.y = element_text(size = 5)) + 
+  labs(
+    subtitle = "Top 50 differential TFs in Cluster 1 (vs. Cluster 6); filtered",
+    x = "Normalized degree", 
+    y = NULL, 
+    fill = NULL
+  )
+```
+
+
+
+#### Try filtering on Cluster 4 vs. Cluster 5
+
+```{r}
+unfiltered_graph_45 <- 
+  clusters$cluster_5_diff_graphs[[4]]
+
+filtered_graph_45 <- 
+  clusters$cluster_5_diff_graphs[[4]] |> 
+  activate("edges") |> 
+  #filter(abs(weight) > quantile(abs(weight), probs = 0.15)) |> 
+  filter(abs(weight) > 1e-3) |> 
+  activate("nodes")
+
+filtered_graph_45
+```
+
+
+```{r}
+# calculate the ranking of the 3 special TFs in the normalized, filtered 
+# edge-subtracted graph
+special_tfs_45_filtered <- 
+  filtered_graph_45 |> 
+  calculate_tf_centralities() |> 
+  normalize_centralities(
+    cluster_1_centralities = clusters$centralities[[5]], 
+    cluster_2_centralities = clusters$centralities[[4]]
+  ) |> 
+  mutate(rank = rank(-normalized_degree)) |> 
+  filter(node_name %in% special_tfs)
+
+special_tfs_45_unfiltered <- 
+  unfiltered_graph_45 |> 
+  calculate_tf_centralities() |> 
+  normalize_centralities(
+    cluster_1_centralities = clusters$centralities[[5]], 
+    cluster_2_centralities = clusters$centralities[[4]]
+  ) |> 
+  mutate(rank = rank(-normalized_degree)) |> 
+  filter(node_name %in% special_tfs)
+
+special_tfs_45_filtered
+special_tfs_45_unfiltered
+```
+
+```{r}
+# plot histogram of all TFs 
+
+## filtered 
+filtered_graph_45 |> 
+  calculate_tf_centralities() |> 
+  normalize_centralities(
+    cluster_1_centralities = clusters$centralities[[5]], 
+    cluster_2_centralities = clusters$centralities[[4]]
+  ) |> 
+  mutate(rank = rank(-normalized_degree)) |> 
+  ggplot(aes(x = normalized_degree)) + 
+  geom_histogram(bins = 30, color = "black", size = 0.5) + 
+  geom_vline(
+    aes(xintercept = normalized_degree, color = node_name), 
+    data = special_tfs_45_filtered
+  ) + 
+  theme_bw() + 
+  labs(
+    subtitle = "Filtered graph; Cluster 4 (FOXA1/FOXA2) vs Cluster 5", 
+    color = NULL
+  )
+
+## unfiltered
+unfiltered_graph_45 |> 
+  calculate_tf_centralities() |> 
+  normalize_centralities(
+    cluster_1_centralities = clusters$centralities[[5]], 
+    cluster_2_centralities = clusters$centralities[[4]]
+  ) |> 
+  mutate(rank = rank(-normalized_degree)) |> 
+  ggplot(aes(x = normalized_degree)) + 
+  geom_histogram(bins = 30, color = "black", size = 0.5) + 
+  geom_vline(
+    aes(xintercept = normalized_degree, color = node_name), 
+    data = special_tfs_45_unfiltered
+  ) + 
+  theme_bw() + 
+  labs(
+    subtitle = "Unfiltered graph; Cluster 4 (FOXA1/FOXA2) vs Cluster 5", 
+    color = NULL
+  )
+```
+
+
+```{r}
+# plot 50 most differential TFs
+# plot normalized centralities of most differential TFs 
+unfiltered_graph_45 |> 
+  calculate_tf_centralities() |> 
+  normalize_centralities(
+    cluster_1_centralities = clusters$centralities[[5]],
+    cluster_2_centralities = clusters$centralities[[4]]
+  ) |> 
+  slice_max(order_by = normalized_degree, n = 50) |>
+  mutate(
+    node_name = fct_reorder(node_name, normalized_degree),
+    special_tf = if_else(node_name %in% special_tfs, "Special TF", "Not special TF")
+  ) |> 
+  ggplot(aes(x = normalized_degree, y = node_name, fill = special_tf)) + 
+  geom_point(shape = 21) + 
+  ggthemes::scale_fill_tableau() + 
+  theme_bw() + 
+  theme(axis.text.y = element_text(size = 5)) + 
+  labs(
+    subtitle = "Top 50 differential TFs in Cluster 4 (vs. Cluster 5); unfiltered",
+    x = "Normalized degree", 
+    y = NULL, 
+    fill = NULL
+  )
+
+filtered_graph_45 |> 
+  calculate_tf_centralities() |> 
+  filter(degree >= quantile(degree, probs = 0.01)) |>
+  normalize_centralities(
+    cluster_1_centralities = clusters$centralities[[5]], 
+    cluster_2_centralities = clusters$centralities[[4]]
+  ) |> 
+  slice_max(order_by = normalized_degree, n = 50) |>
+  mutate(
+    node_name = fct_reorder(node_name, normalized_degree),
+    special_tf = if_else(node_name %in% special_tfs, "Special TF", "Not special TF")
+  ) |> 
+  ggplot(aes(x = normalized_degree, y = node_name, fill = special_tf)) + 
+  geom_point(shape = 21) + 
+  ggthemes::scale_fill_tableau() + 
+  theme_bw() + 
+  theme(axis.text.y = element_text(size = 5)) + 
+  labs(
+    subtitle = "Top 50 differential TFs in Cluster 4 (vs. Cluster 5); filtered",
+    x = "Normalized degree", 
+    y = NULL, 
+    fill = NULL
+  )
+```
+
+
+
+#### Try filtering on Cluster 4 vs. Cluster 6
+
+```{r}
+unfiltered_graph_46 <- 
+  clusters$cluster_6_diff_graphs[[4]]
+
+filtered_graph_46 <- 
+  clusters$cluster_6_diff_graphs[[4]] |> 
+  activate("edges") |> 
+  #filter(abs(weight) > quantile(abs(weight), probs = 0.15)) |> 
+  filter(abs(weight) > 1e-3) |> 
+  activate("nodes")
+
+filtered_graph_46
+```
+
+
+```{r}
+# calculate the ranking of the 3 special TFs in the normalized, filtered 
+# edge-subtracted graph
+special_tfs_46_filtered <- 
+  filtered_graph_46 |> 
+  calculate_tf_centralities() |> 
+  normalize_centralities(
+    cluster_1_centralities = clusters$centralities[[6]], 
+    cluster_2_centralities = clusters$centralities[[4]]
+  ) |> 
+  mutate(rank = rank(-normalized_degree)) |> 
+  filter(node_name %in% special_tfs)
+
+special_tfs_46_unfiltered <- 
+  unfiltered_graph_46 |> 
+  calculate_tf_centralities() |> 
+  normalize_centralities(
+    cluster_1_centralities = clusters$centralities[[6]], 
+    cluster_2_centralities = clusters$centralities[[4]]
+  ) |> 
+  mutate(rank = rank(-normalized_degree)) |> 
+  filter(node_name %in% special_tfs)
+
+special_tfs_46_filtered
+special_tfs_46_unfiltered
+```
+
+```{r}
+# plot histogram of all TFs 
+
+## filtered 
+filtered_graph_46 |> 
+  calculate_tf_centralities() |> 
+  normalize_centralities(
+    cluster_1_centralities = clusters$centralities[[6]], 
+    cluster_2_centralities = clusters$centralities[[4]]
+  ) |> 
+  mutate(rank = rank(-normalized_degree)) |> 
+  ggplot(aes(x = normalized_degree)) + 
+  geom_histogram(bins = 30, color = "black", size = 0.5) + 
+  geom_vline(
+    aes(xintercept = normalized_degree, color = node_name), 
+    data = special_tfs_46_filtered
+  ) + 
+  theme_bw() + 
+  labs(
+    subtitle = "Filtered graph; Cluster 4 (FOXA1/FOXA2) vs Cluster 6", 
+    color = NULL
+  )
+
+## unfiltered
+unfiltered_graph_46 |> 
+  calculate_tf_centralities() |> 
+  normalize_centralities(
+    cluster_1_centralities = clusters$centralities[[6]], 
+    cluster_2_centralities = clusters$centralities[[4]]
+  ) |> 
+  mutate(rank = rank(-normalized_degree)) |> 
+  ggplot(aes(x = normalized_degree)) + 
+  geom_histogram(bins = 30, color = "black", size = 0.5) + 
+  geom_vline(
+    aes(xintercept = normalized_degree, color = node_name), 
+    data = special_tfs_46_unfiltered
+  ) + 
+  theme_bw() + 
+  labs(
+    subtitle = "Unfiltered graph; Cluster 4 (FOXA1/FOXA2) vs Cluster 6", 
+    color = NULL
+  )
+```
+
+
+```{r}
+# plot 50 most differential TFs
+# plot normalized centralities of most differential TFs 
+unfiltered_graph_46 |> 
+  calculate_tf_centralities() |> 
+  normalize_centralities(
+    cluster_1_centralities = clusters$centralities[[6]], 
+    cluster_2_centralities = clusters$centralities[[4]]
+  ) |> 
+  slice_max(order_by = normalized_degree, n = 50) |>
+  mutate(
+    node_name = fct_reorder(node_name, normalized_degree),
+    special_tf = if_else(node_name %in% special_tfs, "Special TF", "Not special TF")
+  ) |> 
+  ggplot(aes(x = normalized_degree, y = node_name, fill = special_tf)) + 
+  geom_point(shape = 21) + 
+  ggthemes::scale_fill_tableau() + 
+  theme_bw() + 
+  theme(axis.text.y = element_text(size = 5)) + 
+  labs(
+    subtitle = "Top 50 differential TFs in Cluster 4 (vs. Cluster 6); unfiltered",
+    x = "Normalized degree", 
+    y = NULL, 
+    fill = NULL
+  )
+
+filtered_graph_46 |> 
+  calculate_tf_centralities() |> 
+  filter(degree >= quantile(degree, probs = 0.01)) |>
+  normalize_centralities(
+    cluster_1_centralities = clusters$centralities[[6]], 
+    cluster_2_centralities = clusters$centralities[[4]]
+  ) |> 
+  slice_max(order_by = normalized_degree, n = 50) |>
+  mutate(
+    node_name = fct_reorder(node_name, normalized_degree),
+    special_tf = if_else(node_name %in% special_tfs, "Special TF", "Not special TF")
+  ) |> 
+  ggplot(aes(x = normalized_degree, y = node_name, fill = special_tf)) + 
+  geom_point(shape = 21) + 
+  ggthemes::scale_fill_tableau() + 
+  theme_bw() + 
+  theme(axis.text.y = element_text(size = 5)) + 
+  labs(
+    subtitle = "Top 50 differential TFs in Cluster 4 (vs. Cluster 6); filtered",
+    x = "Normalized degree", 
+    y = NULL, 
+    fill = NULL
+  )
+```
+
+
+
+#### Try filtering on Cluster 3 vs. Cluster 5
+
+```{r}
+unfiltered_graph_35 <- 
+  clusters$cluster_5_diff_graphs[[3]]
+
+filtered_graph_35 <- 
+  clusters$cluster_5_diff_graphs[[3]] |> 
+  activate("edges") |> 
+  #filter(abs(weight) > quantile(abs(weight), probs = 0.15)) |> 
+  filter(abs(weight) > 1e-3) |> 
+  activate("nodes")
+
+filtered_graph_35
+```
+
+
+```{r}
+# calculate the ranking of the 3 special TFs in the normalized, filtered 
+# edge-subtracted graph
+special_tfs_35_filtered <- 
+  filtered_graph_35 |> 
+  calculate_tf_centralities() |> 
+  normalize_centralities(
+    cluster_1_centralities = clusters$centralities[[5]], 
+    cluster_2_centralities = clusters$centralities[[3]]
+  ) |> 
+  mutate(rank = rank(-normalized_degree)) |> 
+  filter(node_name %in% special_tfs)
+
+special_tfs_35_unfiltered <- 
+  unfiltered_graph_35 |> 
+  calculate_tf_centralities() |> 
+  normalize_centralities(
+    cluster_1_centralities = clusters$centralities[[5]], 
+    cluster_2_centralities = clusters$centralities[[3]]
+  ) |> 
+  mutate(rank = rank(-normalized_degree)) |> 
+  filter(node_name %in% special_tfs)
+
+special_tfs_35_filtered
+special_tfs_35_unfiltered
+```
+
+
+
+```{r}
+# plot histogram of all TFs 
+
+## filtered 
+filtered_graph_35 |> 
+  calculate_tf_centralities() |> 
+  normalize_centralities(
+    cluster_1_centralities = clusters$centralities[[5]], 
+    cluster_2_centralities = clusters$centralities[[3]]
+  ) |> 
+  mutate(rank = rank(-normalized_degree)) |> 
+  ggplot(aes(x = normalized_degree)) + 
+  geom_histogram(bins = 30, color = "black", size = 0.5) + 
+  geom_vline(
+    aes(xintercept = normalized_degree, color = node_name), 
+    data = special_tfs_35_filtered
+  ) + 
+  theme_bw() + 
+  labs(
+    subtitle = "Filtered graph; Cluster 3 (NKX2-1) vs Cluster 5", 
+    color = NULL
+  )
+
+## unfiltered
+unfiltered_graph_35 |> 
+  calculate_tf_centralities() |> 
+  normalize_centralities(
+    cluster_1_centralities = clusters$centralities[[5]], 
+    cluster_2_centralities = clusters$centralities[[3]]
+  ) |> 
+  mutate(rank = rank(-normalized_degree)) |> 
+  ggplot(aes(x = normalized_degree)) + 
+  geom_histogram(bins = 30, color = "black", size = 0.5) + 
+  geom_vline(
+    aes(xintercept = normalized_degree, color = node_name), 
+    data = special_tfs_35_unfiltered
+  ) + 
+  theme_bw() + 
+  labs(
+    subtitle = "Unfiltered graph; Cluster 3 (NKX2-1) vs Cluster 5", 
+    color = NULL
+  )
+```
+
+
+```{r}
+# plot 50 most differential TFs
+# plot normalized centralities of most differential TFs 
+unfiltered_graph_35 |> 
+  calculate_tf_centralities() |> 
+  normalize_centralities(
+    cluster_1_centralities = clusters$centralities[[5]],
+    cluster_2_centralities = clusters$centralities[[3]]
+  ) |> 
+  slice_max(order_by = normalized_degree, n = 50) |>
+  mutate(
+    node_name = fct_reorder(node_name, normalized_degree),
+    special_tf = if_else(node_name %in% special_tfs, "Special TF", "Not special TF")
+  ) |> 
+  ggplot(aes(x = normalized_degree, y = node_name, fill = special_tf)) + 
+  geom_point(shape = 21) + 
+  ggthemes::scale_fill_tableau() + 
+  theme_bw() + 
+  theme(axis.text.y = element_text(size = 5)) + 
+  labs(
+    subtitle = "Top 50 differential TFs in Cluster 3 (vs. Cluster 5); unfiltered",
+    x = "Normalized degree", 
+    y = NULL, 
+    fill = NULL
+  )
+
+filtered_graph_35 |> 
+  calculate_tf_centralities() |> 
+  filter(degree >= quantile(degree, probs = 0.01)) |>
+  normalize_centralities(
+    cluster_1_centralities = clusters$centralities[[5]], 
+    cluster_2_centralities = clusters$centralities[[4]]
+  ) |> 
+  slice_max(order_by = normalized_degree, n = 50) |>
+  mutate(
+    node_name = fct_reorder(node_name, normalized_degree),
+    special_tf = if_else(node_name %in% special_tfs, "Special TF", "Not special TF")
+  ) |> 
+  ggplot(aes(x = normalized_degree, y = node_name, fill = special_tf)) + 
+  geom_point(shape = 21) + 
+  ggthemes::scale_fill_tableau() + 
+  theme_bw() + 
+  theme(axis.text.y = element_text(size = 5)) + 
+  labs(
+    subtitle = "Top 50 differential TFs in Cluster 3 (vs. Cluster 5); filtered",
+    x = "Normalized degree", 
+    y = NULL, 
+    fill = NULL
+  )
+```
+
+
+
+#### Try filtering on Cluster 3 vs. Cluster 6
+
+```{r}
+unfiltered_graph_36 <- 
+  clusters$cluster_6_diff_graphs[[3]]
+
+filtered_graph_36 <- 
+  clusters$cluster_6_diff_graphs[[3]] |> 
+  activate("edges") |> 
+  #filter(abs(weight) > quantile(abs(weight), probs = 0.15)) |> 
+  filter(abs(weight) > 1e-3) |> 
+  activate("nodes")
+
+filtered_graph_36
+```
+
+
+```{r}
+# calculate the ranking of the 3 special TFs in the normalized, filtered 
+# edge-subtracted graph
+special_tfs_36_filtered <- 
+  filtered_graph_36 |> 
+  calculate_tf_centralities() |> 
+  normalize_centralities(
+    cluster_1_centralities = clusters$centralities[[6]], 
+    cluster_2_centralities = clusters$centralities[[3]]
+  ) |> 
+  mutate(rank = rank(-normalized_degree)) |> 
+  filter(node_name %in% special_tfs)
+
+special_tfs_36_unfiltered <- 
+  unfiltered_graph_36 |> 
+  calculate_tf_centralities() |> 
+  normalize_centralities(
+    cluster_1_centralities = clusters$centralities[[6]], 
+    cluster_2_centralities = clusters$centralities[[3]]
+  ) |> 
+  mutate(rank = rank(-normalized_degree)) |> 
+  filter(node_name %in% special_tfs)
+
+special_tfs_36_filtered
+special_tfs_36_unfiltered
+```
+
+```{r}
+# plot histogram of all TFs 
+
+## filtered 
+filtered_graph_36 |> 
+  calculate_tf_centralities() |> 
+  normalize_centralities(
+    cluster_1_centralities = clusters$centralities[[6]], 
+    cluster_2_centralities = clusters$centralities[[3]]
+  ) |> 
+  mutate(rank = rank(-normalized_degree)) |> 
+  ggplot(aes(x = normalized_degree)) + 
+  geom_histogram(bins = 30, color = "black", size = 0.5) + 
+  geom_vline(
+    aes(xintercept = normalized_degree, color = node_name), 
+    data = special_tfs_36_filtered
+  ) + 
+  theme_bw() + 
+  labs(
+    subtitle = "Filtered graph; Cluster 3 (NKX2-1) vs Cluster 6", 
+    color = NULL
+  )
+
+## unfiltered
+unfiltered_graph_36 |> 
+  calculate_tf_centralities() |> 
+  normalize_centralities(
+    cluster_1_centralities = clusters$centralities[[6]], 
+    cluster_2_centralities = clusters$centralities[[3]]
+  ) |> 
+  mutate(rank = rank(-normalized_degree)) |> 
+  ggplot(aes(x = normalized_degree)) + 
+  geom_histogram(bins = 30, color = "black", size = 0.5) + 
+  geom_vline(
+    aes(xintercept = normalized_degree, color = node_name), 
+    data = special_tfs_36_unfiltered
+  ) + 
+  theme_bw() + 
+  labs(
+    subtitle = "Unfiltered graph; Cluster 3 (NKX2-1) vs Cluster 6", 
+    color = NULL
+  )
+```
+
+
+```{r}
+# plot 50 most differential TFs
+# plot normalized centralities of most differential TFs 
+unfiltered_graph_36 |> 
+  calculate_tf_centralities() |> 
+  normalize_centralities(
+    cluster_1_centralities = clusters$centralities[[6]], 
+    cluster_2_centralities = clusters$centralities[[3]]
+  ) |> 
+  slice_max(order_by = normalized_degree, n = 50) |>
+  mutate(
+    node_name = fct_reorder(node_name, normalized_degree),
+    special_tf = if_else(node_name %in% special_tfs, "Special TF", "Not special TF")
+  ) |> 
+  ggplot(aes(x = normalized_degree, y = node_name, fill = special_tf)) + 
+  geom_point(shape = 21) + 
+  ggthemes::scale_fill_tableau() + 
+  theme_bw() + 
+  theme(axis.text.y = element_text(size = 5)) + 
+  labs(
+    subtitle = "Top 50 differential TFs in Cluster 3 (vs. Cluster 6); unfiltered",
+    x = "Normalized degree", 
+    y = NULL, 
+    fill = NULL
+  )
+
+filtered_graph_36 |> 
+  calculate_tf_centralities() |> 
+  filter(degree >= quantile(degree, probs = 0.01)) |>
+  normalize_centralities(
+    cluster_1_centralities = clusters$centralities[[6]], 
+    cluster_2_centralities = clusters$centralities[[4]]
+  ) |> 
+  slice_max(order_by = normalized_degree, n = 50) |>
+  mutate(
+    node_name = fct_reorder(node_name, normalized_degree),
+    special_tf = if_else(node_name %in% special_tfs, "Special TF", "Not special TF")
+  ) |> 
+  ggplot(aes(x = normalized_degree, y = node_name, fill = special_tf)) + 
+  geom_point(shape = 21) + 
+  ggthemes::scale_fill_tableau() + 
+  theme_bw() + 
+  theme(axis.text.y = element_text(size = 5)) + 
+  labs(
+    subtitle = "Top 50 differential TFs in Cluster 3 (vs. Cluster 6); filtered",
+    x = "Normalized degree", 
+    y = NULL, 
+    fill = NULL
+  )
+```
+
+
+
+### Potential solution 2: Use weights to calculate degree values
+
+The other possible solution is to avoid thresholding edges entirely and simply sum their weights (for each TF) rather than counting them (setting each edge over the threshold's weight equal to 1). 
+
+#### Try summing weights for Cluster 1 vs. Cluster 5
+
+
+```{r}
+# calculate the ranking of the 3 special TFs in the normalized 
+# edge-subtracted graph using sums instead of 
+special_tfs_51_summed <- 
+  clusters$cluster_5_diff_graphs[[1]] |> 
+  calculate_tf_centralities(weights = abs(weight)) |> 
+  normalize_centralities(
+    cluster_1_centralities = clusters$weighted_centralities[[5]], 
+    cluster_2_centralities = clusters$weighted_centralities[[1]]
+  ) |> 
+  mutate(rank = rank(-normalized_degree)) |> 
+  filter(node_name %in% special_tfs)
+
+special_tfs_51_counted <- 
+  unfiltered_graph_51 |> 
+  calculate_tf_centralities() |> 
+  normalize_centralities(
+    cluster_1_centralities = clusters$centralities[[5]], 
+    cluster_2_centralities = clusters$centralities[[1]]
+  ) |> 
+  mutate(rank = rank(-normalized_degree)) |> 
+  filter(node_name %in% special_tfs)
+
+special_tfs_51_summed
+special_tfs_51_counted
+```
+
+```{r}
+# plot histogram of all TFs 
+
+## summed 
+clusters$cluster_5_diff_graphs[[1]] |> 
+  calculate_tf_centralities(weights = abs(weight)) |> 
+  normalize_centralities(
+    cluster_1_centralities = clusters$weighted_centralities[[5]], 
+    cluster_2_centralities = clusters$weighted_centralities[[1]]
+  ) |> 
+  mutate(rank = rank(-normalized_degree)) |> 
+  ggplot(aes(x = normalized_degree)) + 
+  geom_histogram(bins = 30, color = "black", size = 0.5) + 
+  geom_vline(
+    aes(xintercept = normalized_degree, color = node_name), 
+    data = special_tfs_51_summed
+  ) + 
+  theme_bw() + 
+  labs(
+    subtitle = "Summed weight graph; Cluster 1 (GATA-6) vs Cluster 5", 
+    color = NULL
+  )
+
+## counted
+unfiltered_graph_51 |> 
+  calculate_tf_centralities() |> 
+  normalize_centralities(
+    cluster_1_centralities = clusters$centralities[[5]], 
+    cluster_2_centralities = clusters$centralities[[1]]
+  ) |> 
+  mutate(rank = rank(-normalized_degree)) |> 
+  ggplot(aes(x = normalized_degree)) + 
+  geom_histogram(bins = 30, color = "black", size = 0.5) + 
+  geom_vline(
+    aes(xintercept = normalized_degree, color = node_name), 
+    data = special_tfs_51_counted
+  ) + 
+  theme_bw() + 
+  labs(
+    subtitle = "Unfiltered graph; Cluster 1 (GATA-6) vs Cluster 5", 
+    color = NULL
+  )
+```
+
+
+```{r}
+# plot 50 most differential TFs
+# plot normalized centralities of most differential TFs 
+unfiltered_graph_51 |> 
+  calculate_tf_centralities() |> 
+  normalize_centralities(
+    cluster_1_centralities = clusters$centralities[[5]], 
+    cluster_2_centralities = clusters$centralities[[1]]
+  ) |> 
+  slice_max(order_by = normalized_degree, n = 50) |>
+  mutate(
+    node_name = fct_reorder(node_name, normalized_degree),
+    special_tf = if_else(node_name %in% special_tfs, "Special TF", "Not special TF")
+  ) |> 
+  ggplot(aes(x = normalized_degree, y = node_name, fill = special_tf)) + 
+  geom_point(shape = 21) + 
+  ggthemes::scale_fill_tableau() + 
+  theme_bw() + 
+  theme(axis.text.y = element_text(size = 5)) + 
+  labs(
+    subtitle = "Top 50 differential TFs in Cluster 1 (vs. Cluster 5); counted",
+    x = "Normalized degree", 
+    y = NULL, 
+    fill = NULL
+  )
+
+
+clusters$cluster_5_diff_graphs[[1]] |> 
+  calculate_tf_centralities(weights = abs(weight)) |> 
+  normalize_centralities(
+    cluster_1_centralities = clusters$weighted_centralities[[5]], 
+    cluster_2_centralities = clusters$weighted_centralities[[1]]
+  ) |> 
+  slice_max(order_by = normalized_degree, n = 50) |>
+  mutate(
+    node_name = fct_reorder(node_name, normalized_degree),
+    special_tf = 
+      if_else(node_name %in% special_tfs, "Special TF", "Not special TF")
+  ) |> 
+  ggplot(aes(x = normalized_degree, y = node_name, fill = special_tf)) + 
+  geom_point(shape = 21) + 
+  ggthemes::scale_fill_tableau() + 
+  theme_bw() + 
+  theme(axis.text.y = element_text(size = 5)) + 
+  labs(
+    subtitle = "Top 50 differential TFs in Cluster 1 (vs. Cluster 5); summed",
+    x = "Normalized degree", 
+    y = NULL, 
+    fill = NULL
+  )
+
+```
+
+
+
+#### Try summing weights for Cluster 1 vs. Cluster 6
+
+
+```{r}
+# calculate the ranking of the 3 special TFs in the normalized 
+# edge-subtracted graph using sums instead of 
+special_tfs_61_summed <- 
+  clusters$cluster_6_diff_graphs[[1]] |> 
+  calculate_tf_centralities(weights = abs(weight)) |> 
+  normalize_centralities(
+    cluster_1_centralities = clusters$weighted_centralities[[6]], 
+    cluster_2_centralities = clusters$weighted_centralities[[1]]
+  ) |> 
+  mutate(rank = rank(-normalized_degree)) |> 
+  filter(node_name %in% special_tfs)
+
+special_tfs_61_counted <- 
+  unfiltered_graph_61 |> 
+  calculate_tf_centralities() |> 
+  normalize_centralities(
+    cluster_1_centralities = clusters$centralities[[6]], 
+    cluster_2_centralities = clusters$centralities[[1]]
+  ) |> 
+  mutate(rank = rank(-normalized_degree)) |> 
+  filter(node_name %in% special_tfs)
+
+special_tfs_61_summed
+special_tfs_61_counted
+```
+
+```{r}
+# plot histogram of all TFs 
+
+## summed 
+clusters$cluster_6_diff_graphs[[1]] |> 
+  calculate_tf_centralities(weights = abs(weight)) |> 
+  normalize_centralities(
+    cluster_1_centralities = clusters$weighted_centralities[[6]], 
+    cluster_2_centralities = clusters$weighted_centralities[[1]]
+  ) |> 
+  mutate(rank = rank(-normalized_degree)) |> 
+  ggplot(aes(x = normalized_degree)) + 
+  geom_histogram(bins = 30, color = "black", size = 0.5) + 
+  geom_vline(
+    aes(xintercept = normalized_degree, color = node_name), 
+    data = special_tfs_61_summed
+  ) + 
+  theme_bw() + 
+  labs(
+    subtitle = "Summed weight graph; Cluster 1 (GATA-6) vs Cluster 6", 
+    color = NULL
+  )
+
+## counted
+unfiltered_graph_61 |> 
+  calculate_tf_centralities() |> 
+  normalize_centralities(
+    cluster_1_centralities = clusters$centralities[[6]], 
+    cluster_2_centralities = clusters$centralities[[1]]
+  ) |> 
+  mutate(rank = rank(-normalized_degree)) |> 
+  ggplot(aes(x = normalized_degree)) + 
+  geom_histogram(bins = 30, color = "black", size = 0.5) + 
+  geom_vline(
+    aes(xintercept = normalized_degree, color = node_name), 
+    data = special_tfs_61_counted
+  ) + 
+  theme_bw() + 
+  labs(
+    subtitle = "Unfiltered graph; Cluster 1 (GATA-6) vs Cluster 6", 
+    color = NULL
+  )
+```
+
+
+
+```{r}
+# plot histogram of all TFs 
+
+## summed 
+compare_differential_cluster_networks(
+  diff_graph = clusters$cluster_6_diff_graphs[[1]], 
+  cluster_1_centralities = clusters$weighted_centralities[[1]], 
+  cluster_2_centralities = clusters$weighted_centralities[[6]], 
+  weights = abs(weight)
+) |> 
+  ggplot(aes(x = normalized_degree)) + 
+  geom_histogram(bins = 30, color = "black", size = 0.5) + 
+  geom_vline(
+    aes(xintercept = normalized_degree, color = node_name), 
+    data = special_tfs_61_summed
+  ) + 
+  theme_bw() + 
+  labs(
+    subtitle = "Summed weight graph; Cluster 1 (GATA-6) vs Cluster 6", 
+    color = NULL
+  )
+
+## counted
+unfiltered_graph_61 |> 
+  compare_differential_cluster_networks(
+    cluster_1_centralities = clusters$centralities[[6]], 
+    cluster_2_centralities = clusters$centralities[[1]]
+  ) |> 
+  ggplot(aes(x = normalized_degree)) + 
+  geom_histogram(bins = 30, color = "black", size = 0.5) + 
+  geom_vline(
+    aes(xintercept = normalized_degree, color = node_name), 
+    data = special_tfs_61_counted
+  ) + 
+  theme_bw() + 
+  labs(
+    subtitle = "Counted graph; Cluster 1 (GATA-6) vs Cluster 6", 
+    color = NULL
+  )
+```
+
+
+
+
+```{r}
+# plot 50 most differential TFs
+# plot normalized centralities of most differential TFs 
+unfiltered_graph_61 |> 
+  calculate_tf_centralities() |> 
+  normalize_centralities(
+    cluster_1_centralities = clusters$centralities[[6]], 
+    cluster_2_centralities = clusters$centralities[[1]]
+  ) |> 
+  slice_max(order_by = normalized_degree, n = 50) |>
+  mutate(
+    node_name = fct_reorder(node_name, normalized_degree),
+    special_tf = if_else(node_name %in% special_tfs, "Special TF", "Not special TF")
+  ) |> 
+  ggplot(aes(x = normalized_degree, y = node_name, fill = special_tf)) + 
+  geom_point(shape = 21) + 
+  ggthemes::scale_fill_tableau() + 
+  theme_bw() + 
+  theme(axis.text.y = element_text(size = 5)) + 
+  labs(
+    subtitle = "Top 50 differential TFs in Cluster 1 (vs. Cluster 6); counted",
+    x = "Normalized degree", 
+    y = NULL, 
+    fill = NULL
+  )
+
+
+clusters$cluster_6_diff_graphs[[1]] |> 
+  calculate_tf_centralities(weights = abs(weight)) |> 
+  normalize_centralities(
+    cluster_1_centralities = clusters$weighted_centralities[[6]], 
+    cluster_2_centralities = clusters$weighted_centralities[[1]]
+  ) |> 
+  slice_max(order_by = normalized_degree, n = 50) |>
+  mutate(
+    node_name = fct_reorder(node_name, normalized_degree),
+    special_tf = 
+      if_else(node_name %in% special_tfs, "Special TF", "Not special TF")
+  ) |> 
+  ggplot(aes(x = normalized_degree, y = node_name, fill = special_tf)) + 
+  geom_point(shape = 21) + 
+  ggthemes::scale_fill_tableau() + 
+  theme_bw() + 
+  theme(axis.text.y = element_text(size = 5)) + 
+  labs(
+    subtitle = "Top 50 differential TFs in Cluster 1 (vs. Cluster 6); summed",
+    x = "Normalized degree", 
+    y = NULL, 
+    fill = NULL
+  )
+
+```
+
+
+#### Try summing weights for Cluster 4 vs. Cluster 5
+
+```{r}
+special_tfs_45_summed <- 
+  compare_differential_cluster_networks(
+    diff_graph = clusters$cluster_5_diff_graphs[[4]], 
+    cluster_1_centralities = clusters$weighted_centralities[[4]], 
+    cluster_2_centralities = clusters$weighted_centralities[[5]], 
+    weights = abs(weight)
+  ) |> 
+  filter(node_name %in% special_tfs)
+
+compare_differential_cluster_networks(
+  diff_graph = clusters$cluster_5_diff_graphs[[4]], 
+  cluster_1_centralities = clusters$weighted_centralities[[4]], 
+  cluster_2_centralities = clusters$weighted_centralities[[5]], 
+  weights = abs(weight)
+) |> 
+  ggplot(aes(x = normalized_degree)) + 
+  geom_histogram(bins = 30, color = "black", size = 0.5) + 
+  geom_vline(
+    aes(xintercept = normalized_degree, color = node_name), 
+    data = special_tfs_45_summed
+  ) + 
+  theme_bw() + 
+  labs(
+    subtitle = "Summed graph; Cluster 4 (FOXA1) vs Cluster 5", 
+    color = NULL
+  )
+```
+
+
+#### Try summing weights for Cluster 4 vs. Cluster 6
+
+
+```{r}
+special_tfs_46_summed <- 
+  compare_differential_cluster_networks(
+    diff_graph = clusters$cluster_6_diff_graphs[[4]], 
+    cluster_1_centralities = clusters$weighted_centralities[[4]], 
+    cluster_2_centralities = clusters$weighted_centralities[[6]], 
+    weights = abs(weight)
+  ) |> 
+  filter(node_name %in% special_tfs)
+
+compare_differential_cluster_networks(
+  diff_graph = clusters$cluster_6_diff_graphs[[4]], 
+  cluster_1_centralities = clusters$weighted_centralities[[4]], 
+  cluster_2_centralities = clusters$weighted_centralities[[6]], 
+  weights = abs(weight)
+) |> 
+  ggplot(aes(x = normalized_degree)) + 
+  geom_histogram(bins = 30, color = "black", size = 0.5) + 
+  geom_vline(
+    aes(xintercept = normalized_degree, color = node_name), 
+    data = special_tfs_46_summed
+  ) + 
+  theme_bw() + 
+  labs(
+    subtitle = "Summed graph; Cluster 4 (FOXA1) vs Cluster 6", 
+    color = NULL
+  )
+```
+
+
+
+#### Try summing weights for Cluster 3 vs. Cluster 5
+
+```{r}
+special_tfs_35_summed <- 
+  compare_differential_cluster_networks(
+    diff_graph = clusters$cluster_5_diff_graphs[[3]], 
+    cluster_1_centralities = clusters$weighted_centralities[[3]], 
+    cluster_2_centralities = clusters$weighted_centralities[[5]], 
+    weights = abs(weight)
+  ) |> 
+  filter(node_name %in% special_tfs)
+
+compare_differential_cluster_networks(
+  diff_graph = clusters$cluster_5_diff_graphs[[3]], 
+  cluster_1_centralities = clusters$weighted_centralities[[3]], 
+  cluster_2_centralities = clusters$weighted_centralities[[5]], 
+  weights = abs(weight)
+) |> 
+  ggplot(aes(x = normalized_degree)) + 
+  geom_histogram(bins = 30, color = "black", size = 0.5) + 
+  geom_vline(
+    aes(xintercept = normalized_degree, color = node_name), 
+    data = special_tfs_35_summed
+  ) + 
+  theme_bw() + 
+  labs(
+    subtitle = "Summed graph; Cluster 3 (NKX2-1) vs Cluster 5", 
+    color = NULL
+  )
+```
+
+
+#### Try summing weights for Cluster 3 vs. Cluster 6
+
+
+```{r}
+special_tfs_36_summed <- 
+  compare_differential_cluster_networks(
+    diff_graph = clusters$cluster_6_diff_graphs[[3]], 
+    cluster_1_centralities = clusters$weighted_centralities[[3]], 
+    cluster_2_centralities = clusters$weighted_centralities[[6]], 
+    weights = abs(weight)
+  ) |> 
+  filter(node_name %in% special_tfs)
+
+compare_differential_cluster_networks(
+  diff_graph = clusters$cluster_6_diff_graphs[[3]], 
+  cluster_1_centralities = clusters$weighted_centralities[[3]], 
+  cluster_2_centralities = clusters$weighted_centralities[[6]], 
+  weights = abs(weight)
+) |> 
+  ggplot(aes(x = normalized_degree)) + 
+  geom_histogram(bins = 30, color = "black", size = 0.5) + 
+  geom_vline(
+    aes(xintercept = normalized_degree, color = node_name), 
+    data = special_tfs_36_summed
+  ) + 
+  theme_bw() + 
+  labs(
+    subtitle = "Summed graph; Cluster 3 (NKX2-1) vs Cluster 6", 
+    color = NULL
+  )
+```
+
+
+
+
+TO DO: For the summed version, maybe it's a good idea to express the edge-subtracted network as a percentage change or fold change of the second network compared to the first one instead of simply using the raw difference (so that all edges are on the same order of magnitude).
+
+
+# Hash values 
+
+## read in data 
+
+```{r}
+dir(input_path) |> 
+  str_subset(pattern = "\\.mtx$")
+
+u_gata6 <- 
+  file.path(input_path, "reprogramseq_HTO10_2_u.mtx") |> 
+  Matrix::readMM()
+
+v_gata6 <- 
+  file.path(input_path, "reprogramseq_HTO10_2_v.mtx") |> 
+  Matrix::readMM()
+```
+
+
+## GATA-6
+
+
+
+### Normalized
+
+### Normalized + filtered
+
+### Normalized + weight-summed
+
+
+## NKX2-1
+
+### Normalized
+
+### Normalized + filtered
+
+### Normalized + weight-summed
+
+
+
+
+
+## FOXA1
+
+### Normalized
+
+### Normalized + filtered
+
+### Normalized + weight-summed
+
+
+
+
+
